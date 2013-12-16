@@ -1,18 +1,18 @@
 /*
- * Copyright (C) 2009 The Android Open Source Project
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+* Copyright (C) 2009 The Android Open Source Project
+*
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+* http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
 
 #include "Dalvik.h"
 #include "libdex/DexOpcodes.h"
@@ -20,462 +20,462 @@
 #include "../../CompilerInternals.h"
 #include "ArmLIR.h"
 #include "Codegen.h"
-#include <sys/mman.h>           /* for protection change */
+#include <sys/mman.h> /* for protection change */
 
 #define MAX_ASSEMBLER_RETRIES 10
 
 /*
- * opcode: ArmOpcode enum
- * skeleton: pre-designated bit-pattern for this opcode
- * k0: key to applying ds/de
- * ds: dest start bit position
- * de: dest end bit position
- * k1: key to applying s1s/s1e
- * s1s: src1 start bit position
- * s1e: src1 end bit position
- * k2: key to applying s2s/s2e
- * s2s: src2 start bit position
- * s2e: src2 end bit position
- * operands: number of operands (for sanity check purposes)
- * name: mnemonic name
- * fmt: for pretty-printing
- */
+* opcode: ArmOpcode enum
+* skeleton: pre-designated bit-pattern for this opcode
+* k0: key to applying ds/de
+* ds: dest start bit position
+* de: dest end bit position
+* k1: key to applying s1s/s1e
+* s1s: src1 start bit position
+* s1e: src1 end bit position
+* k2: key to applying s2s/s2e
+* s2s: src2 start bit position
+* s2e: src2 end bit position
+* operands: number of operands (for sanity check purposes)
+* name: mnemonic name
+* fmt: for pretty-printing
+*/
 #define ENCODING_MAP(opcode, skeleton, k0, ds, de, k1, s1s, s1e, k2, s2s, s2e, \
-                     k3, k3s, k3e, flags, name, fmt, size) \
-        {skeleton, {{k0, ds, de}, {k1, s1s, s1e}, {k2, s2s, s2e}, \
-                    {k3, k3s, k3e}}, opcode, flags, name, fmt, size}
+k3, k3s, k3e, flags, name, fmt, size) \
+{skeleton, {{k0, ds, de}, {k1, s1s, s1e}, {k2, s2s, s2e}, \
+{k3, k3s, k3e}}, opcode, flags, name, fmt, size}
 
 /* Instruction dump string format keys: !pf, where "!" is the start
- * of the key, "p" is which numeric operand to use and "f" is the
- * print format.
- *
- * [p]ositions:
- *     0 -> operands[0] (dest)
- *     1 -> operands[1] (src1)
- *     2 -> operands[2] (src2)
- *     3 -> operands[3] (extra)
- *
- * [f]ormats:
- *     h -> 4-digit hex
- *     d -> decimal
- *     E -> decimal*4
- *     F -> decimal*2
- *     c -> branch condition (beq, bne, etc.)
- *     t -> pc-relative target
- *     u -> 1st half of bl[x] target
- *     v -> 2nd half ob bl[x] target
- *     R -> register list
- *     s -> single precision floating point register
- *     S -> double precision floating point register
- *     m -> Thumb2 modified immediate
- *     n -> complimented Thumb2 modified immediate
- *     M -> Thumb2 16-bit zero-extended immediate
- *     b -> 4-digit binary
- *     B -> dmb option string (sy, st, ish, ishst, nsh, hshst)
- *     H -> operand shift
- *
- *  [!] escape.  To insert "!", use "!!"
- */
+* of the key, "p" is which numeric operand to use and "f" is the
+* print format.
+*
+* [p]ositions:
+* 0 -> operands[0] (dest)
+* 1 -> operands[1] (src1)
+* 2 -> operands[2] (src2)
+* 3 -> operands[3] (extra)
+*
+* [f]ormats:
+* h -> 4-digit hex
+* d -> decimal
+* E -> decimal*4
+* F -> decimal*2
+* c -> branch condition (beq, bne, etc.)
+* t -> pc-relative target
+* u -> 1st half of bl[x] target
+* v -> 2nd half ob bl[x] target
+* R -> register list
+* s -> single precision floating point register
+* S -> double precision floating point register
+* m -> Thumb2 modified immediate
+* n -> complimented Thumb2 modified immediate
+* M -> Thumb2 16-bit zero-extended immediate
+* b -> 4-digit binary
+* B -> dmb option string (sy, st, ish, ishst, nsh, hshst)
+* H -> operand shift
+*
+* [!] escape. To insert "!", use "!!"
+*/
 /* NOTE: must be kept in sync with enum ArmOpcode from ArmLIR.h */
 ArmEncodingMap EncodingMap[kArmLast] = {
-    ENCODING_MAP(kArm16BitData,    0x0000,
+    ENCODING_MAP(kArm16BitData, 0x0000,
                  kFmtBitBlt, 15, 0, kFmtUnused, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_UNARY_OP, "data", "0x!0h(!0d)", 1),
-    ENCODING_MAP(kThumbAdcRR,        0x4140,
+    ENCODING_MAP(kThumbAdcRR, 0x4140,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0_USE01 | SETS_CCODES | USES_CCODES,
                  "adcs", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbAddRRI3,      0x1c00,
+    ENCODING_MAP(kThumbAddRRI3, 0x1c00,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtBitBlt, 8, 6,
                  kFmtUnused, -1, -1,
                  IS_TERTIARY_OP | REG_DEF0_USE1 | SETS_CCODES,
                  "adds", "r!0d, r!1d, #!2d", 1),
-    ENCODING_MAP(kThumbAddRI8,       0x3000,
+    ENCODING_MAP(kThumbAddRI8, 0x3000,
                  kFmtBitBlt, 10, 8, kFmtBitBlt, 7, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0_USE0 | SETS_CCODES,
                  "adds", "r!0d, r!0d, #!1d", 1),
-    ENCODING_MAP(kThumbAddRRR,       0x1800,
+    ENCODING_MAP(kThumbAddRRR, 0x1800,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtBitBlt, 8, 6,
                  kFmtUnused, -1, -1,
                  IS_TERTIARY_OP | REG_DEF0_USE12 | SETS_CCODES,
                  "adds", "r!0d, r!1d, r!2d", 1),
-    ENCODING_MAP(kThumbAddRRLH,     0x4440,
+    ENCODING_MAP(kThumbAddRRLH, 0x4440,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE01,
                  "add", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbAddRRHL,     0x4480,
+    ENCODING_MAP(kThumbAddRRHL, 0x4480,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE01,
                  "add", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbAddRRHH,     0x44c0,
+    ENCODING_MAP(kThumbAddRRHH, 0x44c0,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE01,
                  "add", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbAddPcRel,    0xa000,
+    ENCODING_MAP(kThumbAddPcRel, 0xa000,
                  kFmtBitBlt, 10, 8, kFmtBitBlt, 7, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | IS_BRANCH,
                  "add", "r!0d, pc, #!1E", 1),
-    ENCODING_MAP(kThumbAddSpRel,    0xa800,
+    ENCODING_MAP(kThumbAddSpRel, 0xa800,
                  kFmtBitBlt, 10, 8, kFmtUnused, -1, -1, kFmtBitBlt, 7, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF_SP | REG_USE_SP,
                  "add", "r!0d, sp, #!2E", 1),
-    ENCODING_MAP(kThumbAddSpI7,      0xb000,
+    ENCODING_MAP(kThumbAddSpI7, 0xb000,
                  kFmtBitBlt, 6, 0, kFmtUnused, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_UNARY_OP | REG_DEF_SP | REG_USE_SP,
                  "add", "sp, #!0d*4", 1),
-    ENCODING_MAP(kThumbAndRR,        0x4000,
+    ENCODING_MAP(kThumbAndRR, 0x4000,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0_USE01 | SETS_CCODES,
                  "ands", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbAsrRRI5,      0x1000,
+    ENCODING_MAP(kThumbAsrRRI5, 0x1000,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtBitBlt, 10, 6,
                  kFmtUnused, -1, -1,
                  IS_TERTIARY_OP | REG_DEF0_USE1 | SETS_CCODES,
                  "asrs", "r!0d, r!1d, #!2d", 1),
-    ENCODING_MAP(kThumbAsrRR,        0x4100,
+    ENCODING_MAP(kThumbAsrRR, 0x4100,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0_USE01 | SETS_CCODES,
                  "asrs", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbBCond,        0xd000,
+    ENCODING_MAP(kThumbBCond, 0xd000,
                  kFmtBitBlt, 7, 0, kFmtBitBlt, 11, 8, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | IS_BRANCH | USES_CCODES,
                  "b!1c", "!0t", 1),
-    ENCODING_MAP(kThumbBUncond,      0xe000,
+    ENCODING_MAP(kThumbBUncond, 0xe000,
                  kFmtBitBlt, 10, 0, kFmtUnused, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, NO_OPERAND | IS_BRANCH,
                  "b", "!0t", 1),
-    ENCODING_MAP(kThumbBicRR,        0x4380,
+    ENCODING_MAP(kThumbBicRR, 0x4380,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0_USE01 | SETS_CCODES,
                  "bics", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbBkpt,          0xbe00,
+    ENCODING_MAP(kThumbBkpt, 0xbe00,
                  kFmtBitBlt, 7, 0, kFmtUnused, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_UNARY_OP | IS_BRANCH,
                  "bkpt", "!0d", 1),
-    ENCODING_MAP(kThumbBlx1,         0xf000,
+    ENCODING_MAP(kThumbBlx1, 0xf000,
                  kFmtBitBlt, 10, 0, kFmtUnused, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | IS_BRANCH | REG_DEF_LR,
                  "blx_1", "!0u", 1),
-    ENCODING_MAP(kThumbBlx2,         0xe800,
+    ENCODING_MAP(kThumbBlx2, 0xe800,
                  kFmtBitBlt, 10, 0, kFmtUnused, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | IS_BRANCH | REG_DEF_LR,
                  "blx_2", "!0v", 1),
-    ENCODING_MAP(kThumbBl1,          0xf000,
+    ENCODING_MAP(kThumbBl1, 0xf000,
                  kFmtBitBlt, 10, 0, kFmtUnused, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_UNARY_OP | IS_BRANCH | REG_DEF_LR,
                  "bl_1", "!0u", 1),
-    ENCODING_MAP(kThumbBl2,          0xf800,
+    ENCODING_MAP(kThumbBl2, 0xf800,
                  kFmtBitBlt, 10, 0, kFmtUnused, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_UNARY_OP | IS_BRANCH | REG_DEF_LR,
                  "bl_2", "!0v", 1),
-    ENCODING_MAP(kThumbBlxR,         0x4780,
+    ENCODING_MAP(kThumbBlxR, 0x4780,
                  kFmtBitBlt, 6, 3, kFmtUnused, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_UNARY_OP | REG_USE0 | IS_BRANCH | REG_DEF_LR,
                  "blx", "r!0d", 1),
-    ENCODING_MAP(kThumbBx,            0x4700,
+    ENCODING_MAP(kThumbBx, 0x4700,
                  kFmtBitBlt, 6, 3, kFmtUnused, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_UNARY_OP | IS_BRANCH,
                  "bx", "r!0d", 1),
-    ENCODING_MAP(kThumbCmnRR,        0x42c0,
+    ENCODING_MAP(kThumbCmnRR, 0x42c0,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_USE01 | SETS_CCODES,
                  "cmn", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbCmpRI8,       0x2800,
+    ENCODING_MAP(kThumbCmpRI8, 0x2800,
                  kFmtBitBlt, 10, 8, kFmtBitBlt, 7, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_USE0 | SETS_CCODES,
                  "cmp", "r!0d, #!1d", 1),
-    ENCODING_MAP(kThumbCmpRR,        0x4280,
+    ENCODING_MAP(kThumbCmpRR, 0x4280,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_USE01 | SETS_CCODES,
                  "cmp", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbCmpLH,        0x4540,
+    ENCODING_MAP(kThumbCmpLH, 0x4540,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_USE01 | SETS_CCODES,
                  "cmp", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbCmpHL,        0x4580,
+    ENCODING_MAP(kThumbCmpHL, 0x4580,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_USE01 | SETS_CCODES,
                  "cmp", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbCmpHH,        0x45c0,
+    ENCODING_MAP(kThumbCmpHH, 0x45c0,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_USE01 | SETS_CCODES,
                  "cmp", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbEorRR,        0x4040,
+    ENCODING_MAP(kThumbEorRR, 0x4040,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0_USE01 | SETS_CCODES,
                  "eors", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbLdmia,         0xc800,
+    ENCODING_MAP(kThumbLdmia, 0xc800,
                  kFmtBitBlt, 10, 8, kFmtBitBlt, 7, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0_USE0 | REG_DEF_LIST1 | IS_LOAD,
                  "ldmia", "r!0d!!, <!1R>", 1),
-    ENCODING_MAP(kThumbLdrRRI5,      0x6800,
+    ENCODING_MAP(kThumbLdrRRI5, 0x6800,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtBitBlt, 10, 6,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE1 | IS_LOAD,
                  "ldr", "r!0d, [r!1d, #!2E]", 1),
-    ENCODING_MAP(kThumbLdrRRR,       0x5800,
+    ENCODING_MAP(kThumbLdrRRR, 0x5800,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtBitBlt, 8, 6,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE12 | IS_LOAD,
                  "ldr", "r!0d, [r!1d, r!2d]", 1),
-    ENCODING_MAP(kThumbLdrPcRel,    0x4800,
+    ENCODING_MAP(kThumbLdrPcRel, 0x4800,
                  kFmtBitBlt, 10, 8, kFmtBitBlt, 7, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0 | REG_USE_PC
                  | IS_LOAD, "ldr", "r!0d, [pc, #!1E]", 1),
-    ENCODING_MAP(kThumbLdrSpRel,    0x9800,
+    ENCODING_MAP(kThumbLdrSpRel, 0x9800,
                  kFmtBitBlt, 10, 8, kFmtUnused, -1, -1, kFmtBitBlt, 7, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0 | REG_USE_SP
                  | IS_LOAD, "ldr", "r!0d, [sp, #!2E]", 1),
-    ENCODING_MAP(kThumbLdrbRRI5,     0x7800,
+    ENCODING_MAP(kThumbLdrbRRI5, 0x7800,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtBitBlt, 10, 6,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE1 | IS_LOAD,
                  "ldrb", "r!0d, [r!1d, #2d]", 1),
-    ENCODING_MAP(kThumbLdrbRRR,      0x5c00,
+    ENCODING_MAP(kThumbLdrbRRR, 0x5c00,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtBitBlt, 8, 6,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE12 | IS_LOAD,
                  "ldrb", "r!0d, [r!1d, r!2d]", 1),
-    ENCODING_MAP(kThumbLdrhRRI5,     0x8800,
+    ENCODING_MAP(kThumbLdrhRRI5, 0x8800,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtBitBlt, 10, 6,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE1 | IS_LOAD,
                  "ldrh", "r!0d, [r!1d, #!2F]", 1),
-    ENCODING_MAP(kThumbLdrhRRR,      0x5a00,
+    ENCODING_MAP(kThumbLdrhRRR, 0x5a00,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtBitBlt, 8, 6,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE12 | IS_LOAD,
                  "ldrh", "r!0d, [r!1d, r!2d]", 1),
-    ENCODING_MAP(kThumbLdrsbRRR,     0x5600,
+    ENCODING_MAP(kThumbLdrsbRRR, 0x5600,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtBitBlt, 8, 6,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE12 | IS_LOAD,
                  "ldrsb", "r!0d, [r!1d, r!2d]", 1),
-    ENCODING_MAP(kThumbLdrshRRR,     0x5e00,
+    ENCODING_MAP(kThumbLdrshRRR, 0x5e00,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtBitBlt, 8, 6,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE12 | IS_LOAD,
                  "ldrsh", "r!0d, [r!1d, r!2d]", 1),
-    ENCODING_MAP(kThumbLslRRI5,      0x0000,
+    ENCODING_MAP(kThumbLslRRI5, 0x0000,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtBitBlt, 10, 6,
                  kFmtUnused, -1, -1,
                  IS_TERTIARY_OP | REG_DEF0_USE1 | SETS_CCODES,
                  "lsls", "r!0d, r!1d, #!2d", 1),
-    ENCODING_MAP(kThumbLslRR,        0x4080,
+    ENCODING_MAP(kThumbLslRR, 0x4080,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0_USE01 | SETS_CCODES,
                  "lsls", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbLsrRRI5,      0x0800,
+    ENCODING_MAP(kThumbLsrRRI5, 0x0800,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtBitBlt, 10, 6,
                  kFmtUnused, -1, -1,
                  IS_TERTIARY_OP | REG_DEF0_USE1 | SETS_CCODES,
                  "lsrs", "r!0d, r!1d, #!2d", 1),
-    ENCODING_MAP(kThumbLsrRR,        0x40c0,
+    ENCODING_MAP(kThumbLsrRR, 0x40c0,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0_USE01 | SETS_CCODES,
                  "lsrs", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbMovImm,       0x2000,
+    ENCODING_MAP(kThumbMovImm, 0x2000,
                  kFmtBitBlt, 10, 8, kFmtBitBlt, 7, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0 | SETS_CCODES,
                  "movs", "r!0d, #!1d", 1),
-    ENCODING_MAP(kThumbMovRR,        0x1c00,
+    ENCODING_MAP(kThumbMovRR, 0x1c00,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0_USE1 | SETS_CCODES,
                  "movs", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbMovRR_H2H,    0x46c0,
+    ENCODING_MAP(kThumbMovRR_H2H, 0x46c0,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE1,
                  "mov", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbMovRR_H2L,    0x4640,
+    ENCODING_MAP(kThumbMovRR_H2L, 0x4640,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE1,
                  "mov", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbMovRR_L2H,    0x4680,
+    ENCODING_MAP(kThumbMovRR_L2H, 0x4680,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE1,
                  "mov", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbMul,           0x4340,
+    ENCODING_MAP(kThumbMul, 0x4340,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0_USE01 | SETS_CCODES,
                  "muls", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbMvn,           0x43c0,
+    ENCODING_MAP(kThumbMvn, 0x43c0,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0_USE1 | SETS_CCODES,
                  "mvns", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbNeg,           0x4240,
+    ENCODING_MAP(kThumbNeg, 0x4240,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0_USE1 | SETS_CCODES,
                  "negs", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbOrr,           0x4300,
+    ENCODING_MAP(kThumbOrr, 0x4300,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0_USE01 | SETS_CCODES,
                  "orrs", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbPop,           0xbc00,
+    ENCODING_MAP(kThumbPop, 0xbc00,
                  kFmtBitBlt, 8, 0, kFmtUnused, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_UNARY_OP | REG_DEF_SP | REG_USE_SP | REG_DEF_LIST0
                  | IS_LOAD, "pop", "<!0R>", 1),
-    ENCODING_MAP(kThumbPush,          0xb400,
+    ENCODING_MAP(kThumbPush, 0xb400,
                  kFmtBitBlt, 8, 0, kFmtUnused, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_UNARY_OP | REG_DEF_SP | REG_USE_SP | REG_USE_LIST0
                  | IS_STORE, "push", "<!0R>", 1),
-    ENCODING_MAP(kThumbRorRR,        0x41c0,
+    ENCODING_MAP(kThumbRorRR, 0x41c0,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0_USE01 | SETS_CCODES,
                  "rors", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbSbc,           0x4180,
+    ENCODING_MAP(kThumbSbc, 0x4180,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0_USE01 | USES_CCODES | SETS_CCODES,
                  "sbcs", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumbStmia,         0xc000,
+    ENCODING_MAP(kThumbStmia, 0xc000,
                  kFmtBitBlt, 10, 8, kFmtBitBlt, 7, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0 | REG_USE0 | REG_USE_LIST1 | IS_STORE,
                  "stmia", "r!0d!!, <!1R>", 1),
-    ENCODING_MAP(kThumbStrRRI5,      0x6000,
+    ENCODING_MAP(kThumbStrRRI5, 0x6000,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtBitBlt, 10, 6,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_USE01 | IS_STORE,
                  "str", "r!0d, [r!1d, #!2E]", 1),
-    ENCODING_MAP(kThumbStrRRR,       0x5000,
+    ENCODING_MAP(kThumbStrRRR, 0x5000,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtBitBlt, 8, 6,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_USE012 | IS_STORE,
                  "str", "r!0d, [r!1d, r!2d]", 1),
-    ENCODING_MAP(kThumbStrSpRel,    0x9000,
+    ENCODING_MAP(kThumbStrSpRel, 0x9000,
                  kFmtBitBlt, 10, 8, kFmtUnused, -1, -1, kFmtBitBlt, 7, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_USE0 | REG_USE_SP
                  | IS_STORE, "str", "r!0d, [sp, #!2E]", 1),
-    ENCODING_MAP(kThumbStrbRRI5,     0x7000,
+    ENCODING_MAP(kThumbStrbRRI5, 0x7000,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtBitBlt, 10, 6,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_USE01 | IS_STORE,
                  "strb", "r!0d, [r!1d, #!2d]", 1),
-    ENCODING_MAP(kThumbStrbRRR,      0x5400,
+    ENCODING_MAP(kThumbStrbRRR, 0x5400,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtBitBlt, 8, 6,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_USE012 | IS_STORE,
                  "strb", "r!0d, [r!1d, r!2d]", 1),
-    ENCODING_MAP(kThumbStrhRRI5,     0x8000,
+    ENCODING_MAP(kThumbStrhRRI5, 0x8000,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtBitBlt, 10, 6,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_USE01 | IS_STORE,
                  "strh", "r!0d, [r!1d, #!2F]", 1),
-    ENCODING_MAP(kThumbStrhRRR,      0x5200,
+    ENCODING_MAP(kThumbStrhRRR, 0x5200,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtBitBlt, 8, 6,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_USE012 | IS_STORE,
                  "strh", "r!0d, [r!1d, r!2d]", 1),
-    ENCODING_MAP(kThumbSubRRI3,      0x1e00,
+    ENCODING_MAP(kThumbSubRRI3, 0x1e00,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtBitBlt, 8, 6,
                  kFmtUnused, -1, -1,
                  IS_TERTIARY_OP | REG_DEF0_USE1 | SETS_CCODES,
                  "subs", "r!0d, r!1d, #!2d]", 1),
-    ENCODING_MAP(kThumbSubRI8,       0x3800,
+    ENCODING_MAP(kThumbSubRI8, 0x3800,
                  kFmtBitBlt, 10, 8, kFmtBitBlt, 7, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0_USE0 | SETS_CCODES,
                  "subs", "r!0d, #!1d", 1),
-    ENCODING_MAP(kThumbSubRRR,       0x1a00,
+    ENCODING_MAP(kThumbSubRRR, 0x1a00,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtBitBlt, 8, 6,
                  kFmtUnused, -1, -1,
                  IS_TERTIARY_OP | REG_DEF0_USE12 | SETS_CCODES,
                  "subs", "r!0d, r!1d, r!2d", 1),
-    ENCODING_MAP(kThumbSubSpI7,      0xb080,
+    ENCODING_MAP(kThumbSubSpI7, 0xb080,
                  kFmtBitBlt, 6, 0, kFmtUnused, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_UNARY_OP | REG_DEF_SP | REG_USE_SP,
                  "sub", "sp, #!0d", 1),
-    ENCODING_MAP(kThumbSwi,           0xdf00,
-                 kFmtBitBlt, 7, 0, kFmtUnused, -1, -1, kFmtUnused, -1, -1,                       kFmtUnused, -1, -1, IS_UNARY_OP | IS_BRANCH,
+    ENCODING_MAP(kThumbSwi, 0xdf00,
+                 kFmtBitBlt, 7, 0, kFmtUnused, -1, -1, kFmtUnused, -1, -1, kFmtUnused, -1, -1, IS_UNARY_OP | IS_BRANCH,
                  "swi", "!0d", 1),
-    ENCODING_MAP(kThumbTst,           0x4200,
+    ENCODING_MAP(kThumbTst, 0x4200,
                  kFmtBitBlt, 2, 0, kFmtBitBlt, 5, 3, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_UNARY_OP | REG_USE01 | SETS_CCODES,
                  "tst", "r!0d, r!1d", 1),
-    ENCODING_MAP(kThumb2Vldrs,       0xed900a00,
+    ENCODING_MAP(kThumb2Vldrs, 0xed900a00,
                  kFmtSfp, 22, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 7, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE1 | IS_LOAD,
                  "vldr", "!0s, [r!1d, #!2E]", 2),
-    ENCODING_MAP(kThumb2Vldrd,       0xed900b00,
+    ENCODING_MAP(kThumb2Vldrd, 0xed900b00,
                  kFmtDfp, 22, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 7, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE1 | IS_LOAD,
                  "vldr", "!0S, [r!1d, #!2E]", 2),
-    ENCODING_MAP(kThumb2Vmuls,        0xee200a00,
+    ENCODING_MAP(kThumb2Vmuls, 0xee200a00,
                  kFmtSfp, 22, 12, kFmtSfp, 7, 16, kFmtSfp, 5, 0,
                  kFmtUnused, -1, -1,
                  IS_TERTIARY_OP | REG_DEF0_USE12,
                  "vmuls", "!0s, !1s, !2s", 2),
-    ENCODING_MAP(kThumb2Vmuld,        0xee200b00,
+    ENCODING_MAP(kThumb2Vmuld, 0xee200b00,
                  kFmtDfp, 22, 12, kFmtDfp, 7, 16, kFmtDfp, 5, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE12,
                  "vmuld", "!0S, !1S, !2S", 2),
-    ENCODING_MAP(kThumb2Vstrs,       0xed800a00,
+    ENCODING_MAP(kThumb2Vstrs, 0xed800a00,
                  kFmtSfp, 22, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 7, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_USE01 | IS_STORE,
                  "vstr", "!0s, [r!1d, #!2E]", 2),
-    ENCODING_MAP(kThumb2Vstrd,       0xed800b00,
+    ENCODING_MAP(kThumb2Vstrd, 0xed800b00,
                  kFmtDfp, 22, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 7, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_USE01 | IS_STORE,
                  "vstr", "!0S, [r!1d, #!2E]", 2),
-    ENCODING_MAP(kThumb2Vsubs,        0xee300a40,
+    ENCODING_MAP(kThumb2Vsubs, 0xee300a40,
                  kFmtSfp, 22, 12, kFmtSfp, 7, 16, kFmtSfp, 5, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE12,
                  "vsub", "!0s, !1s, !2s", 2),
-    ENCODING_MAP(kThumb2Vsubd,        0xee300b40,
+    ENCODING_MAP(kThumb2Vsubd, 0xee300b40,
                  kFmtDfp, 22, 12, kFmtDfp, 7, 16, kFmtDfp, 5, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE12,
                  "vsub", "!0S, !1S, !2S", 2),
-    ENCODING_MAP(kThumb2Vadds,        0xee300a00,
+    ENCODING_MAP(kThumb2Vadds, 0xee300a00,
                  kFmtSfp, 22, 12, kFmtSfp, 7, 16, kFmtSfp, 5, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE12,
                  "vadd", "!0s, !1s, !2s", 2),
-    ENCODING_MAP(kThumb2Vaddd,        0xee300b00,
+    ENCODING_MAP(kThumb2Vaddd, 0xee300b00,
                  kFmtDfp, 22, 12, kFmtDfp, 7, 16, kFmtDfp, 5, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE12,
                  "vadd", "!0S, !1S, !2S", 2),
-    ENCODING_MAP(kThumb2Vdivs,        0xee800a00,
+    ENCODING_MAP(kThumb2Vdivs, 0xee800a00,
                  kFmtSfp, 22, 12, kFmtSfp, 7, 16, kFmtSfp, 5, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE12,
                  "vdivs", "!0s, !1s, !2s", 2),
-    ENCODING_MAP(kThumb2Vdivd,        0xee800b00,
+    ENCODING_MAP(kThumb2Vdivd, 0xee800b00,
                  kFmtDfp, 22, 12, kFmtDfp, 7, 16, kFmtDfp, 5, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE12,
                  "vdivd", "!0S, !1S, !2S", 2),
-    ENCODING_MAP(kThumb2VcvtIF,       0xeeb80ac0,
+    ENCODING_MAP(kThumb2VcvtIF, 0xeeb80ac0,
                  kFmtSfp, 22, 12, kFmtSfp, 5, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE1,
                  "vcvt.f32", "!0s, !1s", 2),
-    ENCODING_MAP(kThumb2VcvtID,       0xeeb80bc0,
+    ENCODING_MAP(kThumb2VcvtID, 0xeeb80bc0,
                  kFmtDfp, 22, 12, kFmtSfp, 5, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE1,
                  "vcvt.f64", "!0S, !1s", 2),
-    ENCODING_MAP(kThumb2VcvtFI,       0xeebd0ac0,
+    ENCODING_MAP(kThumb2VcvtFI, 0xeebd0ac0,
                  kFmtSfp, 22, 12, kFmtSfp, 5, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE1,
                  "vcvt.s32.f32 ", "!0s, !1s", 2),
-    ENCODING_MAP(kThumb2VcvtDI,       0xeebd0bc0,
+    ENCODING_MAP(kThumb2VcvtDI, 0xeebd0bc0,
                  kFmtSfp, 22, 12, kFmtDfp, 5, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE1,
                  "vcvt.s32.f64 ", "!0s, !1S", 2),
-    ENCODING_MAP(kThumb2VcvtFd,       0xeeb70ac0,
+    ENCODING_MAP(kThumb2VcvtFd, 0xeeb70ac0,
                  kFmtDfp, 22, 12, kFmtSfp, 5, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE1,
                  "vcvt.f64.f32 ", "!0S, !1s", 2),
-    ENCODING_MAP(kThumb2VcvtDF,       0xeeb70bc0,
+    ENCODING_MAP(kThumb2VcvtDF, 0xeeb70bc0,
                  kFmtSfp, 22, 12, kFmtDfp, 5, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE1,
                  "vcvt.f32.f64 ", "!0s, !1S", 2),
-    ENCODING_MAP(kThumb2Vsqrts,       0xeeb10ac0,
+    ENCODING_MAP(kThumb2Vsqrts, 0xeeb10ac0,
                  kFmtSfp, 22, 12, kFmtSfp, 5, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE1,
                  "vsqrt.f32 ", "!0s, !1s", 2),
-    ENCODING_MAP(kThumb2Vsqrtd,       0xeeb10bc0,
+    ENCODING_MAP(kThumb2Vsqrtd, 0xeeb10bc0,
                  kFmtDfp, 22, 12, kFmtDfp, 5, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE1,
                  "vsqrt.f64 ", "!0S, !1S", 2),
@@ -483,165 +483,165 @@ ArmEncodingMap EncodingMap[kArmLast] = {
                  kFmtBitBlt, 11, 8, kFmtModImm, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0,
                  "mov", "r!0d, #!1m", 2),
-    ENCODING_MAP(kThumb2MovImm16,       0xf2400000,
+    ENCODING_MAP(kThumb2MovImm16, 0xf2400000,
                  kFmtBitBlt, 11, 8, kFmtImm16, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0,
                  "mov", "r!0d, #!1M", 2),
-    ENCODING_MAP(kThumb2StrRRI12,       0xf8c00000,
+    ENCODING_MAP(kThumb2StrRRI12, 0xf8c00000,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 11, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_USE01 | IS_STORE,
                  "str", "r!0d, [r!1d, #!2d]", 2),
-    ENCODING_MAP(kThumb2LdrRRI12,       0xf8d00000,
+    ENCODING_MAP(kThumb2LdrRRI12, 0xf8d00000,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 11, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE1 | IS_LOAD,
                  "ldr", "r!0d, [r!1d, #!2d]", 2),
-    ENCODING_MAP(kThumb2StrRRI8Predec,       0xf8400c00,
+    ENCODING_MAP(kThumb2StrRRI8Predec, 0xf8400c00,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 8, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_USE01 | IS_STORE,
                  "str", "r!0d, [r!1d, #-!2d]", 2),
-    ENCODING_MAP(kThumb2LdrRRI8Predec,       0xf8500c00,
+    ENCODING_MAP(kThumb2LdrRRI8Predec, 0xf8500c00,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 8, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE1 | IS_LOAD,
                  "ldr", "r!0d, [r!1d, #-!2d]", 2),
-    ENCODING_MAP(kThumb2Cbnz,       0xb900, /* Note: does not affect flags */
+    ENCODING_MAP(kThumb2Cbnz, 0xb900, /* Note: does not affect flags */
                  kFmtBitBlt, 2, 0, kFmtImm6, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_USE0 | IS_BRANCH,
                  "cbnz", "r!0d,!1t", 1),
-    ENCODING_MAP(kThumb2Cbz,       0xb100, /* Note: does not affect flags */
+    ENCODING_MAP(kThumb2Cbz, 0xb100, /* Note: does not affect flags */
                  kFmtBitBlt, 2, 0, kFmtImm6, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_USE0 | IS_BRANCH,
                  "cbz", "r!0d,!1t", 1),
-    ENCODING_MAP(kThumb2AddRRI12,       0xf2000000,
+    ENCODING_MAP(kThumb2AddRRI12, 0xf2000000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtImm12, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_TERTIARY_OP | REG_DEF0_USE1,/* Note: doesn't affect flags */
                  "add", "r!0d,r!1d,#!2d", 2),
-    ENCODING_MAP(kThumb2MovRR,       0xea4f0000, /* no setflags encoding */
+    ENCODING_MAP(kThumb2MovRR, 0xea4f0000, /* no setflags encoding */
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 3, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE1,
                  "mov", "r!0d, r!1d", 2),
-    ENCODING_MAP(kThumb2Vmovs,       0xeeb00a40,
+    ENCODING_MAP(kThumb2Vmovs, 0xeeb00a40,
                  kFmtSfp, 22, 12, kFmtSfp, 5, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE1,
                  "vmov.f32 ", " !0s, !1s", 2),
-    ENCODING_MAP(kThumb2Vmovd,       0xeeb00b40,
+    ENCODING_MAP(kThumb2Vmovd, 0xeeb00b40,
                  kFmtDfp, 22, 12, kFmtDfp, 5, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE1,
                  "vmov.f64 ", " !0S, !1S", 2),
-    ENCODING_MAP(kThumb2Ldmia,         0xe8900000,
+    ENCODING_MAP(kThumb2Ldmia, 0xe8900000,
                  kFmtBitBlt, 19, 16, kFmtBitBlt, 15, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0_USE0 | REG_DEF_LIST1 | IS_LOAD,
                  "ldmia", "r!0d!!, <!1R>", 2),
-    ENCODING_MAP(kThumb2Stmia,         0xe8800000,
+    ENCODING_MAP(kThumb2Stmia, 0xe8800000,
                  kFmtBitBlt, 19, 16, kFmtBitBlt, 15, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0_USE0 | REG_USE_LIST1 | IS_STORE,
                  "stmia", "r!0d!!, <!1R>", 2),
-    ENCODING_MAP(kThumb2AddRRR,  0xeb100000, /* setflags encoding */
+    ENCODING_MAP(kThumb2AddRRR, 0xeb100000, /* setflags encoding */
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtShift, -1, -1,
                  IS_QUAD_OP | REG_DEF0_USE12 | SETS_CCODES,
                  "adds", "r!0d, r!1d, r!2d!3H", 2),
-    ENCODING_MAP(kThumb2SubRRR,       0xebb00000, /* setflags enconding */
+    ENCODING_MAP(kThumb2SubRRR, 0xebb00000, /* setflags enconding */
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtShift, -1, -1,
                  IS_QUAD_OP | REG_DEF0_USE12 | SETS_CCODES,
                  "subs", "r!0d, r!1d, r!2d!3H", 2),
-    ENCODING_MAP(kThumb2SbcRRR,       0xeb700000, /* setflags encoding */
+    ENCODING_MAP(kThumb2SbcRRR, 0xeb700000, /* setflags encoding */
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtShift, -1, -1,
                  IS_QUAD_OP | REG_DEF0_USE12 | USES_CCODES | SETS_CCODES,
                  "sbcs", "r!0d, r!1d, r!2d!3H", 2),
-    ENCODING_MAP(kThumb2CmpRR,       0xebb00f00,
+    ENCODING_MAP(kThumb2CmpRR, 0xebb00f00,
                  kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0, kFmtShift, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_TERTIARY_OP | REG_USE01 | SETS_CCODES,
                  "cmp", "r!0d, r!1d", 2),
-    ENCODING_MAP(kThumb2SubRRI12,       0xf2a00000,
+    ENCODING_MAP(kThumb2SubRRI12, 0xf2a00000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtImm12, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_TERTIARY_OP | REG_DEF0_USE1,/* Note: doesn't affect flags */
                  "sub", "r!0d,r!1d,#!2d", 2),
-    ENCODING_MAP(kThumb2MvnImmShift,  0xf06f0000, /* no setflags encoding */
+    ENCODING_MAP(kThumb2MvnImmShift, 0xf06f0000, /* no setflags encoding */
                  kFmtBitBlt, 11, 8, kFmtModImm, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0,
                  "mvn", "r!0d, #!1n", 2),
-    ENCODING_MAP(kThumb2Sel,       0xfaa0f080,
+    ENCODING_MAP(kThumb2Sel, 0xfaa0f080,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtUnused, -1, -1,
                  IS_TERTIARY_OP | REG_DEF0_USE12 | USES_CCODES,
                  "sel", "r!0d, r!1d, r!2d", 2),
-    ENCODING_MAP(kThumb2Ubfx,       0xf3c00000,
+    ENCODING_MAP(kThumb2Ubfx, 0xf3c00000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtLsb, -1, -1,
                  kFmtBWidth, 4, 0, IS_QUAD_OP | REG_DEF0_USE1,
                  "ubfx", "r!0d, r!1d, #!2d, #!3d", 2),
-    ENCODING_MAP(kThumb2Sbfx,       0xf3400000,
+    ENCODING_MAP(kThumb2Sbfx, 0xf3400000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtLsb, -1, -1,
                  kFmtBWidth, 4, 0, IS_QUAD_OP | REG_DEF0_USE1,
                  "sbfx", "r!0d, r!1d, #!2d, #!3d", 2),
-    ENCODING_MAP(kThumb2LdrRRR,    0xf8500000,
+    ENCODING_MAP(kThumb2LdrRRR, 0xf8500000,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtBitBlt, 5, 4, IS_QUAD_OP | REG_DEF0_USE12 | IS_LOAD,
                  "ldr", "r!0d, [r!1d, r!2d, LSL #!3d]", 2),
-    ENCODING_MAP(kThumb2LdrhRRR,    0xf8300000,
+    ENCODING_MAP(kThumb2LdrhRRR, 0xf8300000,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtBitBlt, 5, 4, IS_QUAD_OP | REG_DEF0_USE12 | IS_LOAD,
                  "ldrh", "r!0d, [r!1d, r!2d, LSL #!3d]", 2),
-    ENCODING_MAP(kThumb2LdrshRRR,    0xf9300000,
+    ENCODING_MAP(kThumb2LdrshRRR, 0xf9300000,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtBitBlt, 5, 4, IS_QUAD_OP | REG_DEF0_USE12 | IS_LOAD,
                  "ldrsh", "r!0d, [r!1d, r!2d, LSL #!3d]", 2),
-    ENCODING_MAP(kThumb2LdrbRRR,    0xf8100000,
+    ENCODING_MAP(kThumb2LdrbRRR, 0xf8100000,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtBitBlt, 5, 4, IS_QUAD_OP | REG_DEF0_USE12 | IS_LOAD,
                  "ldrb", "r!0d, [r!1d, r!2d, LSL #!3d]", 2),
-    ENCODING_MAP(kThumb2LdrsbRRR,    0xf9100000,
+    ENCODING_MAP(kThumb2LdrsbRRR, 0xf9100000,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtBitBlt, 5, 4, IS_QUAD_OP | REG_DEF0_USE12 | IS_LOAD,
                  "ldrsb", "r!0d, [r!1d, r!2d, LSL #!3d]", 2),
-    ENCODING_MAP(kThumb2StrRRR,    0xf8400000,
+    ENCODING_MAP(kThumb2StrRRR, 0xf8400000,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtBitBlt, 5, 4, IS_QUAD_OP | REG_USE012 | IS_STORE,
                  "str", "r!0d, [r!1d, r!2d, LSL #!3d]", 2),
-    ENCODING_MAP(kThumb2StrhRRR,    0xf8200000,
+    ENCODING_MAP(kThumb2StrhRRR, 0xf8200000,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtBitBlt, 5, 4, IS_QUAD_OP | REG_USE012 | IS_STORE,
                  "strh", "r!0d, [r!1d, r!2d, LSL #!3d]", 2),
-    ENCODING_MAP(kThumb2StrbRRR,    0xf8000000,
+    ENCODING_MAP(kThumb2StrbRRR, 0xf8000000,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtBitBlt, 5, 4, IS_QUAD_OP | REG_USE012 | IS_STORE,
                  "strb", "r!0d, [r!1d, r!2d, LSL #!3d]", 2),
-    ENCODING_MAP(kThumb2LdrhRRI12,       0xf8b00000,
+    ENCODING_MAP(kThumb2LdrhRRI12, 0xf8b00000,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 11, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE1 | IS_LOAD,
                  "ldrh", "r!0d, [r!1d, #!2d]", 2),
-    ENCODING_MAP(kThumb2LdrshRRI12,       0xf9b00000,
+    ENCODING_MAP(kThumb2LdrshRRI12, 0xf9b00000,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 11, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE1 | IS_LOAD,
                  "ldrsh", "r!0d, [r!1d, #!2d]", 2),
-    ENCODING_MAP(kThumb2LdrbRRI12,       0xf8900000,
+    ENCODING_MAP(kThumb2LdrbRRI12, 0xf8900000,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 11, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE1 | IS_LOAD,
                  "ldrb", "r!0d, [r!1d, #!2d]", 2),
-    ENCODING_MAP(kThumb2LdrsbRRI12,       0xf9900000,
+    ENCODING_MAP(kThumb2LdrsbRRI12, 0xf9900000,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 11, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE1 | IS_LOAD,
                  "ldrsb", "r!0d, [r!1d, #!2d]", 2),
-    ENCODING_MAP(kThumb2StrhRRI12,       0xf8a00000,
+    ENCODING_MAP(kThumb2StrhRRI12, 0xf8a00000,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 11, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_USE01 | IS_STORE,
                  "strh", "r!0d, [r!1d, #!2d]", 2),
-    ENCODING_MAP(kThumb2StrbRRI12,       0xf8800000,
+    ENCODING_MAP(kThumb2StrbRRI12, 0xf8800000,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 11, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_USE01 | IS_STORE,
                  "strb", "r!0d, [r!1d, #!2d]", 2),
-    ENCODING_MAP(kThumb2Pop,           0xe8bd0000,
+    ENCODING_MAP(kThumb2Pop, 0xe8bd0000,
                  kFmtBitBlt, 15, 0, kFmtUnused, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_UNARY_OP | REG_DEF_SP | REG_USE_SP | REG_DEF_LIST0
                  | IS_LOAD, "pop", "<!0R>", 2),
-    ENCODING_MAP(kThumb2Push,          0xe92d0000,
+    ENCODING_MAP(kThumb2Push, 0xe92d0000,
                  kFmtBitBlt, 15, 0, kFmtUnused, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_UNARY_OP | REG_DEF_SP | REG_USE_SP | REG_USE_LIST0
@@ -651,257 +651,257 @@ ArmEncodingMap EncodingMap[kArmLast] = {
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_USE0 | SETS_CCODES,
                  "cmp", "r!0d, #!1m", 2),
-    ENCODING_MAP(kThumb2AdcRRR,  0xeb500000, /* setflags encoding */
+    ENCODING_MAP(kThumb2AdcRRR, 0xeb500000, /* setflags encoding */
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtShift, -1, -1,
                  IS_QUAD_OP | REG_DEF0_USE12 | SETS_CCODES,
                  "adcs", "r!0d, r!1d, r!2d!3H", 2),
-    ENCODING_MAP(kThumb2AndRRR,  0xea000000,
+    ENCODING_MAP(kThumb2AndRRR, 0xea000000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtShift, -1, -1, IS_QUAD_OP | REG_DEF0_USE12,
                  "and", "r!0d, r!1d, r!2d!3H", 2),
-    ENCODING_MAP(kThumb2BicRRR,  0xea200000,
+    ENCODING_MAP(kThumb2BicRRR, 0xea200000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtShift, -1, -1, IS_QUAD_OP | REG_DEF0_USE12,
                  "bic", "r!0d, r!1d, r!2d!3H", 2),
-    ENCODING_MAP(kThumb2CmnRR,  0xeb000000,
+    ENCODING_MAP(kThumb2CmnRR, 0xeb000000,
                  kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0, kFmtShift, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_TERTIARY_OP | REG_DEF0_USE1 | SETS_CCODES,
                  "cmn", "r!0d, r!1d, shift !2d", 2),
-    ENCODING_MAP(kThumb2EorRRR,  0xea800000,
+    ENCODING_MAP(kThumb2EorRRR, 0xea800000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtShift, -1, -1, IS_QUAD_OP | REG_DEF0_USE12,
                  "eor", "r!0d, r!1d, r!2d!3H", 2),
-    ENCODING_MAP(kThumb2MulRRR,  0xfb00f000,
+    ENCODING_MAP(kThumb2MulRRR, 0xfb00f000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE12,
                  "mul", "r!0d, r!1d, r!2d", 2),
-    ENCODING_MAP(kThumb2MnvRR,  0xea6f0000,
+    ENCODING_MAP(kThumb2MnvRR, 0xea6f0000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 3, 0, kFmtShift, -1, -1,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE1,
                  "mvn", "r!0d, r!1d, shift !2d", 2),
-    ENCODING_MAP(kThumb2RsubRRI8,       0xf1d00000,
+    ENCODING_MAP(kThumb2RsubRRI8, 0xf1d00000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtModImm, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_TERTIARY_OP | REG_DEF0_USE1 | SETS_CCODES,
                  "rsb", "r!0d,r!1d,#!2m", 2),
-    ENCODING_MAP(kThumb2NegRR,       0xf1d00000, /* instance of rsub */
+    ENCODING_MAP(kThumb2NegRR, 0xf1d00000, /* instance of rsub */
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0_USE1 | SETS_CCODES,
                  "neg", "r!0d,r!1d", 2),
-    ENCODING_MAP(kThumb2OrrRRR,  0xea400000,
+    ENCODING_MAP(kThumb2OrrRRR, 0xea400000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtShift, -1, -1, IS_QUAD_OP | REG_DEF0_USE12,
                  "orr", "r!0d, r!1d, r!2d!3H", 2),
-    ENCODING_MAP(kThumb2TstRR,       0xea100f00,
+    ENCODING_MAP(kThumb2TstRR, 0xea100f00,
                  kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0, kFmtShift, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_TERTIARY_OP | REG_USE01 | SETS_CCODES,
                  "tst", "r!0d, r!1d, shift !2d", 2),
-    ENCODING_MAP(kThumb2LslRRR,  0xfa00f000,
+    ENCODING_MAP(kThumb2LslRRR, 0xfa00f000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE12,
                  "lsl", "r!0d, r!1d, r!2d", 2),
-    ENCODING_MAP(kThumb2LsrRRR,  0xfa20f000,
+    ENCODING_MAP(kThumb2LsrRRR, 0xfa20f000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE12,
                  "lsr", "r!0d, r!1d, r!2d", 2),
-    ENCODING_MAP(kThumb2AsrRRR,  0xfa40f000,
+    ENCODING_MAP(kThumb2AsrRRR, 0xfa40f000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE12,
                  "asr", "r!0d, r!1d, r!2d", 2),
-    ENCODING_MAP(kThumb2RorRRR,  0xfa60f000,
+    ENCODING_MAP(kThumb2RorRRR, 0xfa60f000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE12,
                  "ror", "r!0d, r!1d, r!2d", 2),
-    ENCODING_MAP(kThumb2LslRRI5,  0xea4f0000,
+    ENCODING_MAP(kThumb2LslRRI5, 0xea4f0000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 3, 0, kFmtShift5, -1, -1,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE1,
                  "lsl", "r!0d, r!1d, #!2d", 2),
-    ENCODING_MAP(kThumb2LsrRRI5,  0xea4f0010,
+    ENCODING_MAP(kThumb2LsrRRI5, 0xea4f0010,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 3, 0, kFmtShift5, -1, -1,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE1,
                  "lsr", "r!0d, r!1d, #!2d", 2),
-    ENCODING_MAP(kThumb2AsrRRI5,  0xea4f0020,
+    ENCODING_MAP(kThumb2AsrRRI5, 0xea4f0020,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 3, 0, kFmtShift5, -1, -1,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE1,
                  "asr", "r!0d, r!1d, #!2d", 2),
-    ENCODING_MAP(kThumb2RorRRI5,  0xea4f0030,
+    ENCODING_MAP(kThumb2RorRRI5, 0xea4f0030,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 3, 0, kFmtShift5, -1, -1,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE1,
                  "ror", "r!0d, r!1d, #!2d", 2),
-    ENCODING_MAP(kThumb2BicRRI8,  0xf0200000,
+    ENCODING_MAP(kThumb2BicRRI8, 0xf0200000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtModImm, -1, -1,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE1,
                  "bic", "r!0d, r!1d, #!2m", 2),
-    ENCODING_MAP(kThumb2AndRRI8,  0xf0000000,
+    ENCODING_MAP(kThumb2AndRRI8, 0xf0000000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtModImm, -1, -1,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE1,
                  "and", "r!0d, r!1d, #!2m", 2),
-    ENCODING_MAP(kThumb2OrrRRI8,  0xf0400000,
+    ENCODING_MAP(kThumb2OrrRRI8, 0xf0400000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtModImm, -1, -1,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE1,
                  "orr", "r!0d, r!1d, #!2m", 2),
-    ENCODING_MAP(kThumb2EorRRI8,  0xf0800000,
+    ENCODING_MAP(kThumb2EorRRI8, 0xf0800000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtModImm, -1, -1,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE1,
                  "eor", "r!0d, r!1d, #!2m", 2),
-    ENCODING_MAP(kThumb2AddRRI8,  0xf1100000,
+    ENCODING_MAP(kThumb2AddRRI8, 0xf1100000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtModImm, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_TERTIARY_OP | REG_DEF0_USE1 | SETS_CCODES,
                  "adds", "r!0d, r!1d, #!2m", 2),
-    ENCODING_MAP(kThumb2AdcRRI8,  0xf1500000,
+    ENCODING_MAP(kThumb2AdcRRI8, 0xf1500000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtModImm, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_TERTIARY_OP | REG_DEF0_USE1 | SETS_CCODES | USES_CCODES,
                  "adcs", "r!0d, r!1d, #!2m", 2),
-    ENCODING_MAP(kThumb2SubRRI8,  0xf1b00000,
+    ENCODING_MAP(kThumb2SubRRI8, 0xf1b00000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtModImm, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_TERTIARY_OP | REG_DEF0_USE1 | SETS_CCODES,
                  "subs", "r!0d, r!1d, #!2m", 2),
-    ENCODING_MAP(kThumb2SbcRRI8,  0xf1700000,
+    ENCODING_MAP(kThumb2SbcRRI8, 0xf1700000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtModImm, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_TERTIARY_OP | REG_DEF0_USE1 | SETS_CCODES | USES_CCODES,
                  "sbcs", "r!0d, r!1d, #!2m", 2),
-    ENCODING_MAP(kThumb2It,  0xbf00,
+    ENCODING_MAP(kThumb2It, 0xbf00,
                  kFmtBitBlt, 7, 4, kFmtBitBlt, 3, 0, kFmtModImm, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | IS_IT | USES_CCODES,
                  "it:!1b", "!0c", 1),
-    ENCODING_MAP(kThumb2Fmstat,  0xeef1fa10,
+    ENCODING_MAP(kThumb2Fmstat, 0xeef1fa10,
                  kFmtUnused, -1, -1, kFmtUnused, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, NO_OPERAND | SETS_CCODES,
                  "fmstat", "", 2),
-    ENCODING_MAP(kThumb2Vcmpd,        0xeeb40b40,
+    ENCODING_MAP(kThumb2Vcmpd, 0xeeb40b40,
                  kFmtDfp, 22, 12, kFmtDfp, 5, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_USE01,
                  "vcmp.f64", "!0S, !1S", 2),
-    ENCODING_MAP(kThumb2Vcmps,        0xeeb40a40,
+    ENCODING_MAP(kThumb2Vcmps, 0xeeb40a40,
                  kFmtSfp, 22, 12, kFmtSfp, 5, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_USE01,
                  "vcmp.f32", "!0s, !1s", 2),
-    ENCODING_MAP(kThumb2LdrPcRel12,       0xf8df0000,
+    ENCODING_MAP(kThumb2LdrPcRel12, 0xf8df0000,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 11, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_TERTIARY_OP | REG_DEF0 | REG_USE_PC | IS_LOAD,
                  "ldr", "r!0d, [r15pc, #!1d]", 2),
-    ENCODING_MAP(kThumb2BCond,        0xf0008000,
+    ENCODING_MAP(kThumb2BCond, 0xf0008000,
                  kFmtBrOffset, -1, -1, kFmtBitBlt, 25, 22, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | IS_BRANCH | USES_CCODES,
                  "b!1c", "!0t", 2),
-    ENCODING_MAP(kThumb2Vmovd_RR,       0xeeb00b40,
+    ENCODING_MAP(kThumb2Vmovd_RR, 0xeeb00b40,
                  kFmtDfp, 22, 12, kFmtDfp, 5, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE1,
                  "vmov.f64", "!0S, !1S", 2),
-    ENCODING_MAP(kThumb2Vmovs_RR,       0xeeb00a40,
+    ENCODING_MAP(kThumb2Vmovs_RR, 0xeeb00a40,
                  kFmtSfp, 22, 12, kFmtSfp, 5, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE1,
                  "vmov.f32", "!0s, !1s", 2),
-    ENCODING_MAP(kThumb2Fmrs,       0xee100a10,
+    ENCODING_MAP(kThumb2Fmrs, 0xee100a10,
                  kFmtBitBlt, 15, 12, kFmtSfp, 7, 16, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE1,
                  "fmrs", "r!0d, !1s", 2),
-    ENCODING_MAP(kThumb2Fmsr,       0xee000a10,
+    ENCODING_MAP(kThumb2Fmsr, 0xee000a10,
                  kFmtSfp, 7, 16, kFmtBitBlt, 15, 12, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE1,
                  "fmsr", "!0s, r!1d", 2),
-    ENCODING_MAP(kThumb2Fmrrd,       0xec500b10,
+    ENCODING_MAP(kThumb2Fmrrd, 0xec500b10,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 19, 16, kFmtDfp, 5, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF01_USE2,
                  "fmrrd", "r!0d, r!1d, !2S", 2),
-    ENCODING_MAP(kThumb2Fmdrr,       0xec400b10,
+    ENCODING_MAP(kThumb2Fmdrr, 0xec400b10,
                  kFmtDfp, 5, 0, kFmtBitBlt, 15, 12, kFmtBitBlt, 19, 16,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE12,
                  "fmdrr", "!0S, r!1d, r!2d", 2),
-    ENCODING_MAP(kThumb2Vabsd,       0xeeb00bc0,
+    ENCODING_MAP(kThumb2Vabsd, 0xeeb00bc0,
                  kFmtDfp, 22, 12, kFmtDfp, 5, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE1,
                  "vabs.f64", "!0S, !1S", 2),
-    ENCODING_MAP(kThumb2Vabss,       0xeeb00ac0,
+    ENCODING_MAP(kThumb2Vabss, 0xeeb00ac0,
                  kFmtSfp, 22, 12, kFmtSfp, 5, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE1,
                  "vabs.f32", "!0s, !1s", 2),
-    ENCODING_MAP(kThumb2Vnegd,       0xeeb10b40,
+    ENCODING_MAP(kThumb2Vnegd, 0xeeb10b40,
                  kFmtDfp, 22, 12, kFmtDfp, 5, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE1,
                  "vneg.f64", "!0S, !1S", 2),
-    ENCODING_MAP(kThumb2Vnegs,       0xeeb10a40,
+    ENCODING_MAP(kThumb2Vnegs, 0xeeb10a40,
                  kFmtSfp, 22, 12, kFmtSfp, 5, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0_USE1,
                  "vneg.f32", "!0s, !1s", 2),
-    ENCODING_MAP(kThumb2Vmovs_IMM8,       0xeeb00a00,
+    ENCODING_MAP(kThumb2Vmovs_IMM8, 0xeeb00a00,
                  kFmtSfp, 22, 12, kFmtFPImm, 16, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0,
                  "vmov.f32", "!0s, #0x!1h", 2),
-    ENCODING_MAP(kThumb2Vmovd_IMM8,       0xeeb00b00,
+    ENCODING_MAP(kThumb2Vmovd_IMM8, 0xeeb00b00,
                  kFmtDfp, 22, 12, kFmtFPImm, 16, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0,
                  "vmov.f64", "!0S, #0x!1h", 2),
-    ENCODING_MAP(kThumb2Mla,  0xfb000000,
+    ENCODING_MAP(kThumb2Mla, 0xfb000000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtBitBlt, 15, 12,
                  IS_QUAD_OP | REG_DEF0 | REG_USE1 | REG_USE2 | REG_USE3,
                  "mla", "r!0d, r!1d, r!2d, r!3d", 2),
-    ENCODING_MAP(kThumb2Umull,  0xfba00000,
+    ENCODING_MAP(kThumb2Umull, 0xfba00000,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16,
                  kFmtBitBlt, 3, 0,
                  IS_QUAD_OP | REG_DEF0 | REG_DEF1 | REG_USE2 | REG_USE3,
                  "umull", "r!0d, r!1d, r!2d, r!3d", 2),
-    ENCODING_MAP(kThumb2Ldrex,       0xe8500f00,
+    ENCODING_MAP(kThumb2Ldrex, 0xe8500f00,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 19, 16, kFmtBitBlt, 7, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE1 | IS_LOAD,
                  "ldrex", "r!0d, [r!1d, #!2E]", 2),
-    ENCODING_MAP(kThumb2Strex,       0xe8400000,
+    ENCODING_MAP(kThumb2Strex, 0xe8400000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 15, 12, kFmtBitBlt, 19, 16,
                  kFmtBitBlt, 7, 0, IS_QUAD_OP | REG_DEF0_USE12 | IS_STORE,
                  "strex", "r!0d,r!1d, [r!2d, #!2E]", 2),
-    ENCODING_MAP(kThumb2Clrex,       0xf3bf8f2f,
+    ENCODING_MAP(kThumb2Clrex, 0xf3bf8f2f,
                  kFmtUnused, -1, -1, kFmtUnused, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, NO_OPERAND,
                  "clrex", "", 2),
-    ENCODING_MAP(kThumb2Bfi,         0xf3600000,
+    ENCODING_MAP(kThumb2Bfi, 0xf3600000,
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtShift5, -1, -1,
                  kFmtBitBlt, 4, 0, IS_QUAD_OP | REG_DEF0_USE1,
                  "bfi", "r!0d,r!1d,#!2d,#!3d", 2),
-    ENCODING_MAP(kThumb2Bfc,         0xf36f0000,
+    ENCODING_MAP(kThumb2Bfc, 0xf36f0000,
                  kFmtBitBlt, 11, 8, kFmtShift5, -1, -1, kFmtBitBlt, 4, 0,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0,
                  "bfc", "r!0d,#!1d,#!2d", 2),
-    ENCODING_MAP(kThumb2Dmb,         0xf3bf8f50,
+    ENCODING_MAP(kThumb2Dmb, 0xf3bf8f50,
                  kFmtBitBlt, 3, 0, kFmtUnused, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_UNARY_OP,
                  "dmb","#!0B",2),
-    ENCODING_MAP(kThumb2LdrPcReln12,       0xf85f0000,
+    ENCODING_MAP(kThumb2LdrPcReln12, 0xf85f0000,
                  kFmtBitBlt, 15, 12, kFmtBitBlt, 11, 0, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1,
                  IS_BINARY_OP | REG_DEF0 | REG_USE_PC | IS_LOAD,
                  "ldr", "r!0d, [r15pc, -#!1d]", 2),
-    ENCODING_MAP(kThumb2RsbRRR,  0xebd00000, /* setflags encoding */
+    ENCODING_MAP(kThumb2RsbRRR, 0xebd00000, /* setflags encoding */
                  kFmtBitBlt, 11, 8, kFmtBitBlt, 19, 16, kFmtBitBlt, 3, 0,
                  kFmtShift, -1, -1,
                  IS_QUAD_OP | REG_DEF0_USE12 | SETS_CCODES,
                  "rsb", "r!0d, r!1d, r!2d!3H", 2),
-    ENCODING_MAP(kThumbUndefined,       0xde00,
+    ENCODING_MAP(kThumbUndefined, 0xde00,
                  kFmtUnused, -1, -1, kFmtUnused, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, NO_OPERAND,
                  "undefined", "", 1),
 };
 
 /*
- * The fake NOP of moving r0 to r0 actually will incur data stalls if r0 is
- * not ready. Since r5FP is not updated often, it is less likely to
- * generate unnecessary stall cycles.
- */
-#define PADDING_MOV_R5_R5               0x1C2D
+* The fake NOP of moving r0 to r0 actually will incur data stalls if r0 is
+* not ready. Since r5FP is not updated often, it is less likely to
+* generate unnecessary stall cycles.
+*/
+#define PADDING_MOV_R5_R5 0x1C2D
 
 /* Track the number of times that the code cache is patched */
 #if defined(WITH_JIT_TUNING)
-#define UPDATE_CODE_CACHE_PATCHES()    (gDvmJit.codeCachePatches++)
+#define UPDATE_CODE_CACHE_PATCHES() (gDvmJit.codeCachePatches++)
 #else
 #define UPDATE_CODE_CACHE_PATCHES()
 #endif
@@ -915,9 +915,9 @@ static void installLiteralPools(CompilationUnit *cUnit)
     ArmLIR *dataLIR = (ArmLIR *) cUnit->classPointerList;
     while (dataLIR) {
         /*
-         * Install the callsiteinfo pointers into the cells for now. They will
-         * be converted into real pointers in dvmJitInstallClassObjectPointers.
-         */
+* Install the callsiteinfo pointers into the cells for now. They will
+* be converted into real pointers in dvmJitInstallClassObjectPointers.
+*/
         *dataPtr++ = dataLIR->operands[0];
         dataLIR = NEXT_LIR(dataLIR);
     }
@@ -929,11 +929,11 @@ static void installLiteralPools(CompilationUnit *cUnit)
 }
 
 /*
- * Assemble the LIR into binary instruction format.  Note that we may
- * discover that pc-relative displacements may not fit the selected
- * instruction.  In those cases we will try to substitute a new code
- * sequence or request that the trace be shortened and retried.
- */
+* Assemble the LIR into binary instruction format. Note that we may
+* discover that pc-relative displacements may not fit the selected
+* instruction. In those cases we will try to substitute a new code
+* sequence or request that the trace be shortened and retried.
+*/
 static AssemblerStatus assembleInstructions(CompilationUnit *cUnit,
                                             intptr_t startAddr)
 {
@@ -1027,12 +1027,18 @@ static AssemblerStatus assembleInstructions(CompilationUnit *cUnit,
             intptr_t target = targetLIR->generic.offset;
             int delta = target - pc;
             if ((lir->opcode == kThumbBCond) && (delta > 254 || delta < -256)) {
-                if (cUnit->printMe) {
-                    ALOGD("kThumbBCond@%x: delta=%d", lir->generic.offset,
-                         delta);
-                    dvmCompilerCodegenDump(cUnit);
+                if (delta <= 1048574 && delta >= -1048576) {
+                    /* convert T1 branch to T3 */
+                    lir->opcode = kThumb2BCond;
+                    return kRetryAll;
+                } else {
+                    if (cUnit->printMe) {
+                        ALOGD("kThumbBCond@%x: delta=%d", lir->generic.offset,
+                            delta);
+                        dvmCompilerCodegenDump(cUnit);
+                    }
+                    return kRetryHalve;
                 }
-                return kRetryHalve;
             }
             lir->operands[0] = delta >> 1;
         } else if (lir->opcode == kThumbBUncond) {
@@ -1089,11 +1095,11 @@ static AssemblerStatus assembleInstructions(CompilationUnit *cUnit,
                     bits |= value;
                     break;
                 case kFmtBrOffset:
-                    value = ((operand  & 0x80000) >> 19) << 26;
+                    value = ((operand & 0x80000) >> 19) << 26;
                     value |= ((operand & 0x40000) >> 18) << 11;
                     value |= ((operand & 0x20000) >> 17) << 13;
                     value |= ((operand & 0x1f800) >> 11) << 16;
-                    value |= (operand  & 0x007ff);
+                    value |= (operand & 0x007ff);
                     bits |= value;
                     break;
                 case kFmtShift5:
@@ -1194,58 +1200,58 @@ static int assignLiteralOffset(CompilationUnit *cUnit, int offset)
 }
 
 /*
- * Translation layout in the code cache.  Note that the codeAddress pointer
- * in JitTable will point directly to the code body (field codeAddress).  The
- * chain cell offset codeAddress - 2, and the address of the trace profile
- * counter is at codeAddress - 6.
- *
- *      +----------------------------+
- *      | Trace Profile Counter addr |  -> 4 bytes (PROF_COUNTER_ADDR_SIZE)
- *      +----------------------------+
- *   +--| Offset to chain cell counts|  -> 2 bytes (CHAIN_CELL_OFFSET_SIZE)
- *   |  +----------------------------+
- *   |  | Trace profile code         |  <- entry point when profiling
- *   |  .  -   -   -   -   -   -   - .
- *   |  | Code body                  |  <- entry point when not profiling
- *   |  .                            .
- *   |  |                            |
- *   |  +----------------------------+
- *   |  | Chaining Cells             |  -> 12/16 bytes, 4 byte aligned
- *   |  .                            .
- *   |  .                            .
- *   |  |                            |
- *   |  +----------------------------+
- *   |  | Gap for large switch stmt  |  -> # cases >= MAX_CHAINED_SWITCH_CASES
- *   |  +----------------------------+
- *   +->| Chaining cell counts       |  -> 8 bytes, chain cell counts by type
- *      +----------------------------+
- *      | Trace description          |  -> variable sized
- *      .                            .
- *      |                            |
- *      +----------------------------+
- *      | # Class pointer pool size  |  -> 4 bytes
- *      +----------------------------+
- *      | Class pointer pool         |  -> 4-byte aligned, variable size
- *      .                            .
- *      .                            .
- *      |                            |
- *      +----------------------------+
- *      | Literal pool               |  -> 4-byte aligned, variable size
- *      .                            .
- *      .                            .
- *      |                            |
- *      +----------------------------+
- *
- */
+* Translation layout in the code cache. Note that the codeAddress pointer
+* in JitTable will point directly to the code body (field codeAddress). The
+* chain cell offset codeAddress - 2, and the address of the trace profile
+* counter is at codeAddress - 6.
+*
+* +----------------------------+
+* | Trace Profile Counter addr | -> 4 bytes (PROF_COUNTER_ADDR_SIZE)
+* +----------------------------+
+* +--| Offset to chain cell counts| -> 2 bytes (CHAIN_CELL_OFFSET_SIZE)
+* | +----------------------------+
+* | | Trace profile code | <- entry point when profiling
+* | . - - - - - - - .
+* | | Code body | <- entry point when not profiling
+* | . .
+* | | |
+* | +----------------------------+
+* | | Chaining Cells | -> 12/16 bytes, 4 byte aligned
+* | . .
+* | . .
+* | | |
+* | +----------------------------+
+* | | Gap for large switch stmt | -> # cases >= MAX_CHAINED_SWITCH_CASES
+* | +----------------------------+
+* +->| Chaining cell counts | -> 8 bytes, chain cell counts by type
+* +----------------------------+
+* | Trace description | -> variable sized
+* . .
+* | |
+* +----------------------------+
+* | # Class pointer pool size | -> 4 bytes
+* +----------------------------+
+* | Class pointer pool | -> 4-byte aligned, variable size
+* . .
+* . .
+* | |
+* +----------------------------+
+* | Literal pool | -> 4-byte aligned, variable size
+* . .
+* . .
+* | |
+* +----------------------------+
+*
+*/
 
 #define PROF_COUNTER_ADDR_SIZE 4
 #define CHAIN_CELL_OFFSET_SIZE 2
 
 /*
- * Utility functions to navigate various parts in a trace. If we change the
- * layout/offset in the future, we just modify these functions and we don't need
- * to propagate the changes to all the use cases.
- */
+* Utility functions to navigate various parts in a trace. If we change the
+* layout/offset in the future, we just modify these functions and we don't need
+* to propagate the changes to all the use cases.
+*/
 static inline char *getTraceBase(const JitEntry *p)
 {
     return (char*)p->codeAddress -
@@ -1356,10 +1362,10 @@ static void matchSignatureBreakpoint(const CompilationUnit *cUnit,
 #endif
 
 /*
- * Go over each instruction in the list and calculate the offset from the top
- * before sending them off to the assembler. If out-of-range branch distance is
- * seen rearrange the instructions a bit to correct it.
- */
+* Go over each instruction in the list and calculate the offset from the top
+* before sending them off to the assembler. If out-of-range branch distance is
+* seen rearrange the instructions a bit to correct it.
+*/
 void dvmCompilerAssembleLIR(CompilationUnit *cUnit, JitTranslationInfo *info)
 {
     ArmLIR *armLIR;
@@ -1399,10 +1405,10 @@ void dvmCompilerAssembleLIR(CompilationUnit *cUnit, JitTranslationInfo *info)
 
     if (cUnit->jitMode != kJitMethod) {
         /*
-         * Get the gap (# of u4) between the offset of chaining cell count and
-         * the bottom of real chaining cells. If the translation has chaining
-         * cells, the gap is guaranteed to be multiples of 4.
-         */
+* Get the gap (# of u4) between the offset of chaining cell count and
+* the bottom of real chaining cells. If the translation has chaining
+* cells, the gap is guaranteed to be multiples of 4.
+*/
         chainingCellGap = (offset - cUnit->chainingCellBottom->offset) >> 2;
 
         /* Add space for chain cell counts & trace description */
@@ -1413,23 +1419,23 @@ void dvmCompilerAssembleLIR(CompilationUnit *cUnit, JitTranslationInfo *info)
                chainCellOffsetLIR->operands[0] == CHAIN_CELL_OFFSET_TAG);
 
         /*
-         * Adjust the CHAIN_CELL_OFFSET_TAG LIR's offset to remove the
-         * space occupied by the pointer to the trace profiling counter.
-         */
+* Adjust the CHAIN_CELL_OFFSET_TAG LIR's offset to remove the
+* space occupied by the pointer to the trace profiling counter.
+*/
         chainCellOffsetLIR->operands[0] = chainCellOffset - 4;
 
         offset += sizeof(chainCellCounts) + descSize;
 
-        assert((offset & 0x3) == 0);  /* Should still be word aligned */
+        assert((offset & 0x3) == 0); /* Should still be word aligned */
     }
 
     /* Set up offsets for literals */
     cUnit->dataOffset = offset;
 
     /*
-     * Assign each class pointer/constant an offset from the beginning of the
-     * compilation unit.
-     */
+* Assign each class pointer/constant an offset from the beginning of the
+* compilation unit.
+*/
     offset = assignLiteralOffset(cUnit, offset);
 
     cUnit->totalSize = offset;
@@ -1449,9 +1455,9 @@ void dvmCompilerAssembleLIR(CompilationUnit *cUnit, JitTranslationInfo *info)
     }
 
     /*
-     * Attempt to assemble the trace.  Note that assembleInstructions
-     * may rewrite the code sequence and request a retry.
-     */
+* Attempt to assemble the trace. Note that assembleInstructions
+* may rewrite the code sequence and request a retry.
+*/
     cUnit->assemblerStatus = assembleInstructions(cUnit,
           (intptr_t) gDvmJit.codeCache + gDvmJit.codeCacheByteUsed);
 
@@ -1488,12 +1494,12 @@ void dvmCompilerAssembleLIR(CompilationUnit *cUnit, JitTranslationInfo *info)
     if (info->discardResult) return;
 
     /*
-     * The cache might disappear - acquire lock and check version
-     * Continue holding lock until translation cache update is complete.
-     * These actions are required here in the compiler thread because
-     * it is unaffected by suspend requests and doesn't know if a
-     * translation cache flush is in progress.
-     */
+* The cache might disappear - acquire lock and check version
+* Continue holding lock until translation cache update is complete.
+* These actions are required here in the compiler thread because
+* it is unaffected by suspend requests and doesn't know if a
+* translation cache flush is in progress.
+*/
     dvmLockMutex(&gDvmJit.compilerLock);
     if (info->cacheVersion != gDvmJit.cacheVersion) {
         /* Cache changed - discard current translation */
@@ -1553,9 +1559,9 @@ void dvmCompilerAssembleLIR(CompilationUnit *cUnit, JitTranslationInfo *info)
 }
 
 /*
- * Returns the skeleton bit pattern associated with an opcode.  All
- * variable fields are zeroed.
- */
+* Returns the skeleton bit pattern associated with an opcode. All
+* variable fields are zeroed.
+*/
 static u4 getSkeleton(ArmOpcode op)
 {
     return EncodingMap[op].skeleton;
@@ -1566,32 +1572,32 @@ static u4 assembleChainingBranch(int branchOffset, bool thumbTarget)
     u4 thumb1, thumb2;
 
     if (!thumbTarget) {
-        thumb1 =  (getSkeleton(kThumbBlx1) | ((branchOffset>>12) & 0x7ff));
-        thumb2 =  (getSkeleton(kThumbBlx2) | ((branchOffset>> 1) & 0x7ff));
+        thumb1 = (getSkeleton(kThumbBlx1) | ((branchOffset>>12) & 0x7ff));
+        thumb2 = (getSkeleton(kThumbBlx2) | ((branchOffset>> 1) & 0x7ff));
     } else if ((branchOffset < -2048) | (branchOffset > 2046)) {
-        thumb1 =  (getSkeleton(kThumbBl1) | ((branchOffset>>12) & 0x7ff));
-        thumb2 =  (getSkeleton(kThumbBl2) | ((branchOffset>> 1) & 0x7ff));
+        thumb1 = (getSkeleton(kThumbBl1) | ((branchOffset>>12) & 0x7ff));
+        thumb2 = (getSkeleton(kThumbBl2) | ((branchOffset>> 1) & 0x7ff));
     } else {
-        thumb1 =  (getSkeleton(kThumbBUncond) | ((branchOffset>> 1) & 0x7ff));
-        thumb2 =  getSkeleton(kThumbOrr);  /* nop -> or r0, r0 */
+        thumb1 = (getSkeleton(kThumbBUncond) | ((branchOffset>> 1) & 0x7ff));
+        thumb2 = getSkeleton(kThumbOrr); /* nop -> or r0, r0 */
     }
 
     return thumb2<<16 | thumb1;
 }
 
 /*
- * Perform translation chain operation.
- * For ARM, we'll use a pair of thumb instructions to generate
- * an unconditional chaining branch of up to 4MB in distance.
- * Use a BL, because the generic "interpret" translation needs
- * the link register to find the dalvik pc of teh target.
- *     111HHooooooooooo
- * Where HH is 10 for the 1st inst, and 11 for the second and
- * the "o" field is each instruction's 11-bit contribution to the
- * 22-bit branch offset.
- * If the target is nearby, use a single-instruction bl.
- * If one or more threads is suspended, don't chain.
- */
+* Perform translation chain operation.
+* For ARM, we'll use a pair of thumb instructions to generate
+* an unconditional chaining branch of up to 4MB in distance.
+* Use a BL, because the generic "interpret" translation needs
+* the link register to find the dalvik pc of teh target.
+* 111HHooooooooooo
+* Where HH is 10 for the 1st inst, and 11 for the second and
+* the "o" field is each instruction's 11-bit contribution to the
+* 22-bit branch offset.
+* If the target is nearby, use a single-instruction bl.
+* If one or more threads is suspended, don't chain.
+*/
 void* dvmJitChain(void* tgtAddr, u4* branchAddr)
 {
     int baseAddr = (u4) branchAddr + 4;
@@ -1600,9 +1606,9 @@ void* dvmJitChain(void* tgtAddr, u4* branchAddr)
     bool thumbTarget;
 
     /*
-     * Only chain translations when there is no urge to ask all threads to
-     * suspend themselves via the interpreter.
-     */
+* Only chain translations when there is no urge to ask all threads to
+* suspend themselves via the interpreter.
+*/
     if ((gDvmJit.pProfTable != NULL) && (gDvm.sumThreadSuspendCount == 0) &&
         (gDvmJit.codeCacheFull == false)) {
         assert((branchOffset >= -(1<<22)) && (branchOffset <= ((1<<22)-2)));
@@ -1614,21 +1620,21 @@ void* dvmJitChain(void* tgtAddr, u4* branchAddr)
                  (int) branchAddr, (int) tgtAddr & -2));
 
         /*
-         * NOTE: normally, all translations are Thumb[2] mode, with
-         * a single exception: the default TEMPLATE_INTERPRET
-         * pseudo-translation.  If the need ever arises to
-         * mix Arm & Thumb[2] translations, the following code should be
-         * generalized.
-         */
+* NOTE: normally, all translations are Thumb[2] mode, with
+* a single exception: the default TEMPLATE_INTERPRET
+* pseudo-translation. If the need ever arises to
+* mix Arm & Thumb[2] translations, the following code should be
+* generalized.
+*/
         thumbTarget = (tgtAddr != dvmCompilerGetInterpretTemplate());
 
         newInst = assembleChainingBranch(branchOffset, thumbTarget);
 
         /*
-         * The second half-word instruction of the chaining cell must
-         * either be a nop (which represents initial state), or is the
-         * same exact branch halfword that we are trying to install.
-         */
+* The second half-word instruction of the chaining cell must
+* either be a nop (which represents initial state), or is the
+* same exact branch halfword that we are trying to install.
+*/
         assert( ((*branchAddr >> 16) == getSkeleton(kThumbOrr)) ||
                 ((*branchAddr >> 16) == (newInst >> 16)));
 
@@ -1648,17 +1654,17 @@ void* dvmJitChain(void* tgtAddr, u4* branchAddr)
 
 #if !defined(WITH_SELF_VERIFICATION)
 /*
- * Attempt to enqueue a work order to patch an inline cache for a predicted
- * chaining cell for virtual/interface calls.
- */
+* Attempt to enqueue a work order to patch an inline cache for a predicted
+* chaining cell for virtual/interface calls.
+*/
 static void inlineCachePatchEnqueue(PredictedChainingCell *cellAddr,
                                     PredictedChainingCell *newContent)
 {
     /*
-     * Make sure only one thread gets here since updating the cell (ie fast
-     * path and queueing the request (ie the queued path) have to be done
-     * in an atomic fashion.
-     */
+* Make sure only one thread gets here since updating the cell (ie fast
+* path and queueing the request (ie the queued path) have to be done
+* in an atomic fashion.
+*/
     dvmLockMutex(&gDvmJit.compilerICPatchLock);
 
     /* Fast path for uninitialized chaining cell */
@@ -1670,9 +1676,9 @@ static void inlineCachePatchEnqueue(PredictedChainingCell *cellAddr,
         cellAddr->method = newContent->method;
         cellAddr->branch = newContent->branch;
         /*
-         * The update order matters - make sure clazz is updated last since it
-         * will bring the uninitialized chaining cell to life.
-         */
+* The update order matters - make sure clazz is updated last since it
+* will bring the uninitialized chaining cell to life.
+*/
         android_atomic_release_store((int32_t)newContent->clazz,
             (volatile int32_t *)(void *)&cellAddr->clazz);
         dvmCompilerCacheFlush((intptr_t) cellAddr, (intptr_t) (cellAddr+1), 0);
@@ -1697,9 +1703,9 @@ static void inlineCachePatchEnqueue(PredictedChainingCell *cellAddr,
         gDvmJit.icPatchRejected++;
 #endif
     /*
-     * Different classes but same method implementation - it is safe to just
-     * patch the class value without the need to stop the world.
-     */
+* Different classes but same method implementation - it is safe to just
+* patch the class value without the need to stop the world.
+*/
     } else if (cellAddr->method == newContent->method) {
         UNPROTECT_CODE_CACHE(cellAddr, sizeof(*cellAddr));
 
@@ -1713,9 +1719,9 @@ static void inlineCachePatchEnqueue(PredictedChainingCell *cellAddr,
         gDvmJit.icPatchLockFree++;
 #endif
     /*
-     * Cannot patch the chaining cell inline - queue it until the next safe
-     * point.
-     */
+* Cannot patch the chaining cell inline - queue it until the next safe
+* point.
+*/
     } else if (gDvmJit.compilerICPatchIndex < COMPILER_IC_PATCH_QUEUE_SIZE) {
         int index = gDvmJit.compilerICPatchIndex++;
         const ClassObject *clazz = newContent->clazz;
@@ -1741,19 +1747,19 @@ static void inlineCachePatchEnqueue(PredictedChainingCell *cellAddr,
 #endif
 
 /*
- * This method is called from the invoke templates for virtual and interface
- * methods to speculatively setup a chain to the callee. The templates are
- * written in assembly and have setup method, cell, and clazz at r0, r2, and
- * r3 respectively, so there is a unused argument in the list. Upon return one
- * of the following three results may happen:
- *   1) Chain is not setup because the callee is native. Reset the rechain
- *      count to a big number so that it will take a long time before the next
- *      rechain attempt to happen.
- *   2) Chain is not setup because the callee has not been created yet. Reset
- *      the rechain count to a small number and retry in the near future.
- *   3) Enqueue the new content for the chaining cell which will be appled in
- *      next safe point.
- */
+* This method is called from the invoke templates for virtual and interface
+* methods to speculatively setup a chain to the callee. The templates are
+* written in assembly and have setup method, cell, and clazz at r0, r2, and
+* r3 respectively, so there is a unused argument in the list. Upon return one
+* of the following three results may happen:
+* 1) Chain is not setup because the callee is native. Reset the rechain
+* count to a big number so that it will take a long time before the next
+* rechain attempt to happen.
+* 2) Chain is not setup because the callee has not been created yet. Reset
+* the rechain count to a small number and retry in the near future.
+* 3) Enqueue the new content for the chaining cell which will be appled in
+* next safe point.
+*/
 const Method *dvmJitToPatchPredictedChain(const Method *method,
                                           Thread *self,
                                           PredictedChainingCell *cell,
@@ -1770,10 +1776,10 @@ const Method *dvmJitToPatchPredictedChain(const Method *method,
         UNPROTECT_CODE_CACHE(cell, sizeof(*cell));
 
         /*
-         * Put a non-zero/bogus value in the clazz field so that it won't
-         * trigger immediate patching and will continue to fail to match with
-         * a real clazz pointer.
-         */
+* Put a non-zero/bogus value in the clazz field so that it won't
+* trigger immediate patching and will continue to fail to match with
+* a real clazz pointer.
+*/
         cell->clazz = (ClassObject *) PREDICTED_CHAIN_FAKE_CLAZZ;
 
         UPDATE_CODE_CACHE_PATCHES();
@@ -1783,9 +1789,9 @@ const Method *dvmJitToPatchPredictedChain(const Method *method,
     tgtAddr = (int) dvmJitGetTraceAddr(method->insns);
 
     /*
-     * Compilation not made yet for the callee. Reset the counter to a small
-     * value and come back to check soon.
-     */
+* Compilation not made yet for the callee. Reset the counter to a small
+* value and come back to check soon.
+*/
     if ((tgtAddr == 0) ||
         ((void*)tgtAddr == dvmCompilerGetInterpretTemplate())) {
         COMPILER_TRACE_CHAINING(
@@ -1798,7 +1804,7 @@ const Method *dvmJitToPatchPredictedChain(const Method *method,
         newRechainCount = self->icRechainCount;
     }
 
-    baseAddr = (int) cell + 4;   // PC is cur_addr + 4
+    baseAddr = (int) cell + 4; // PC is cur_addr + 4
     branchOffset = tgtAddr - baseAddr;
 
     newCell.branch = assembleChainingBranch(branchOffset, true);
@@ -1807,12 +1813,12 @@ const Method *dvmJitToPatchPredictedChain(const Method *method,
     newCell.stagedClazz = NULL;
 
     /*
-     * Enter the work order to the queue and the chaining cell will be patched
-     * the next time a safe point is entered.
-     *
-     * If the enqueuing fails reset the rechain count to a normal value so that
-     * it won't get indefinitely delayed.
-     */
+* Enter the work order to the queue and the chaining cell will be patched
+* the next time a safe point is entered.
+*
+* If the enqueuing fails reset the rechain count to a normal value so that
+* it won't get indefinitely delayed.
+*/
     inlineCachePatchEnqueue(cell, &newCell);
 #endif
 done:
@@ -1821,9 +1827,9 @@ done:
 }
 
 /*
- * Patch the inline cache content based on the content passed from the work
- * order.
- */
+* Patch the inline cache content based on the content passed from the work
+* order.
+*/
 void dvmCompilerPatchInlineCache(void)
 {
     int i;
@@ -1833,10 +1839,10 @@ void dvmCompilerPatchInlineCache(void)
     if (gDvmJit.compilerICPatchIndex == 0) return;
 
     /*
-     * Since all threads are already stopped we don't really need to acquire
-     * the lock. But race condition can be easily introduced in the future w/o
-     * paying attention so we still acquire the lock here.
-     */
+* Since all threads are already stopped we don't really need to acquire
+* the lock. But race condition can be easily introduced in the future w/o
+* paying attention so we still acquire the lock here.
+*/
     dvmLockMutex(&gDvmJit.compilerICPatchLock);
 
     UNPROTECT_CODE_CACHE(gDvmJit.codeCache, gDvmJit.codeCacheByteUsed);
@@ -1885,12 +1891,12 @@ void dvmCompilerPatchInlineCache(void)
 }
 
 /*
- * Unchain a trace given the starting address of the translation
- * in the code cache.  Refer to the diagram in dvmCompilerAssembleLIR.
- * Returns the address following the last cell unchained.  Note that
- * the incoming codeAddr is a thumb code address, and therefore has
- * the low bit set.
- */
+* Unchain a trace given the starting address of the translation
+* in the code cache. Refer to the diagram in dvmCompilerAssembleLIR.
+* Returns the address following the last cell unchained. Note that
+* the incoming codeAddr is a thumb code address, and therefore has
+* the low bit set.
+*/
 static u4* unchainSingle(JitEntry *trace)
 {
     const char *base = getTraceBase(trace);
@@ -1910,7 +1916,7 @@ static u4* unchainSingle(JitEntry *trace)
 
     /* The cells are sorted in order - walk through them and reset */
     for (i = 0; i < kChainingCellGap; i++) {
-        int elemSize = CHAIN_CELL_NORMAL_SIZE >> 2;  /* In 32-bit words */
+        int elemSize = CHAIN_CELL_NORMAL_SIZE >> 2; /* In 32-bit words */
         if (i == kChainingCellInvokePredicted) {
             elemSize = CHAIN_CELL_PREDICTED_SIZE >> 2;
         }
@@ -1922,12 +1928,12 @@ static u4* unchainSingle(JitEntry *trace)
                 case kChainingCellInvokeSingleton:
                 case kChainingCellBackwardBranch:
                     /*
-                     * Replace the 1st half-word of the cell with an
-                     * unconditional branch, leaving the 2nd half-word
-                     * untouched.  This avoids problems with a thread
-                     * that is suspended between the two halves when
-                     * this unchaining takes place.
-                     */
+* Replace the 1st half-word of the cell with an
+* unconditional branch, leaving the 2nd half-word
+* untouched. This avoids problems with a thread
+* that is suspended between the two halves when
+* this unchaining takes place.
+*/
                     newInst = *pChainCells;
                     newInst &= 0xFFFF0000;
                     newInst |= getSkeleton(kThumbBUncond); /* b offset is 0 */
@@ -1936,21 +1942,21 @@ static u4* unchainSingle(JitEntry *trace)
                 case kChainingCellInvokePredicted:
                     predChainCell = (PredictedChainingCell *) pChainCells;
                     /*
-                     * There could be a race on another mutator thread to use
-                     * this particular predicted cell and the check has passed
-                     * the clazz comparison. So we cannot safely wipe the
-                     * method and branch but it is safe to clear the clazz,
-                     * which serves as the key.
-                     */
+* There could be a race on another mutator thread to use
+* this particular predicted cell and the check has passed
+* the clazz comparison. So we cannot safely wipe the
+* method and branch but it is safe to clear the clazz,
+* which serves as the key.
+*/
                     predChainCell->clazz = PREDICTED_CHAIN_CLAZZ_INIT;
                     break;
                 default:
                     ALOGE("Unexpected chaining type: %d", i);
-                    dvmAbort();  // dvmAbort OK here - can't safely recover
+                    dvmAbort(); // dvmAbort OK here - can't safely recover
             }
             COMPILER_TRACE_CHAINING(
                 ALOGD("Jit Runtime: unchaining %#x", (int)pChainCells));
-            pChainCells += elemSize;  /* Advance by a fixed number of words */
+            pChainCells += elemSize; /* Advance by a fixed number of words */
         }
     }
     return pChainCells;
@@ -2041,12 +2047,12 @@ static int dumpTraceProfile(JitEntry *p, bool silent, bool reset,
     jitProfileAddrToLine addrToLine = {0, desc->trace[0].info.frag.startOffset};
 
     /*
-     * We may end up decoding the debug information for the same method
-     * multiple times, but the tradeoff is we don't need to allocate extra
-     * space to store the addr/line mapping. Since this is a debugging feature
-     * and done infrequently so the slower but simpler mechanism should work
-     * just fine.
-     */
+* We may end up decoding the debug information for the same method
+* multiple times, but the tradeoff is we don't need to allocate extra
+* space to store the addr/line mapping. Since this is a debugging feature
+* and done infrequently so the slower but simpler mechanism should work
+* just fine.
+*/
     dexDecodeDebugInfo(method->clazz->pDvmDex->pDexFile,
                        dvmGetMethodCode(method),
                        method->clazz->descriptor,
@@ -2071,15 +2077,15 @@ static int dumpTraceProfile(JitEntry *p, bool silent, bool reset,
     }
 
     /*
-     * runEnd must comes with a JitCodeDesc frag. If isCode is false it must
-     * be a meta info field (only used by callsite info for now).
-     */
+* runEnd must comes with a JitCodeDesc frag. If isCode is false it must
+* be a meta info field (only used by callsite info for now).
+*/
     if (!desc->trace[idx].isCode) {
         const Method *method = (const Method *)
             desc->trace[idx+JIT_TRACE_CUR_METHOD-1].info.meta;
         char *methodDesc = dexProtoCopyMethodDescriptor(&method->prototype);
         /* Print the callee info in the trace */
-        ALOGD("    -> %s%s;%s", method->clazz->descriptor, method->name,
+        ALOGD(" -> %s%s;%s", method->clazz->descriptor, method->name,
              methodDesc);
     }
 
@@ -2153,7 +2159,7 @@ void dvmCompilerSortAndPrintTraceProfiles()
     }
 
     ALOGD("JIT: Average execution count -> %d",(int)(sum / numTraces));
-    // How efficiently are we using code cache memory?  Bigger is better.
+    // How efficiently are we using code cache memory? Bigger is better.
     ALOGD("JIT: CodeCache efficiency -> %.2f",(float)sum / (float)gDvmJit.codeCacheByteUsed);
 
     /* Dump the sorted entries. The count of each trace will be reset to 0. */
@@ -2210,9 +2216,9 @@ static void findClassPointersSingleTrace(char *base, void (*callback)(void *))
                 PredictedChainingCell *cell =
                     (PredictedChainingCell *) pChainCells;
                 /*
-                 * Report the cell if it contains a sane class
-                 * pointer.
-                 */
+* Report the cell if it contains a sane class
+* pointer.
+*/
                 if (cell->clazz != NULL &&
                     cell->clazz !=
                       (ClassObject *) PREDICTED_CHAIN_FAKE_CLAZZ) {
@@ -2234,10 +2240,10 @@ static void findClassPointersSingleTrace(char *base, void (*callback)(void *))
 }
 
 /*
- * Scan class pointers in each translation and pass its address to the callback
- * function. Currently such a pointers can be found in the pointer pool and the
- * clazz field in the predicted chaining cells.
- */
+* Scan class pointers in each translation and pass its address to the callback
+* function. Currently such a pointers can be found in the pointer pool and the
+* clazz field in the predicted chaining cells.
+*/
 void dvmJitScanAllClassPointers(void (*callback)(void *))
 {
     UNPROTECT_CODE_CACHE(gDvmJit.codeCache, gDvmJit.codeCacheByteUsed);
@@ -2268,9 +2274,9 @@ void dvmJitScanAllClassPointers(void (*callback)(void *))
 }
 
 /*
- * Provide the final touch on the class object pointer pool to install the
- * actual pointers. The thread has to be in the running state.
- */
+* Provide the final touch on the class object pointer pool to install the
+* actual pointers. The thread has to be in the running state.
+*/
 void dvmJitInstallClassObjectPointers(CompilationUnit *cUnit, char *codeAddress)
 {
     char *base = codeAddress - cUnit->headerSize -
@@ -2284,22 +2290,22 @@ void dvmJitInstallClassObjectPointers(CompilationUnit *cUnit, char *codeAddress)
     intptr_t *startClassPointerP = classPointerP;
 
     /*
-     * Change the thread state to VM_RUNNING so that GC won't be happening
-     * when the assembler looks up the class pointers. May suspend the current
-     * thread if there is a pending request before the state is actually
-     * changed to RUNNING.
-     */
+* Change the thread state to VM_RUNNING so that GC won't be happening
+* when the assembler looks up the class pointers. May suspend the current
+* thread if there is a pending request before the state is actually
+* changed to RUNNING.
+*/
     dvmChangeStatus(gDvmJit.compilerThread, THREAD_RUNNING);
 
     /*
-     * Unprotecting the code cache will need to acquire the code cache
-     * protection lock first. Doing so after the state change may increase the
-     * time spent in the RUNNING state (which may delay the next GC request
-     * should there be contention on codeCacheProtectionLock). In practice
-     * this is probably not going to happen often since a GC is just served.
-     * More importantly, acquiring the lock before the state change will
-     * cause deadlock (b/4192964).
-     */
+* Unprotecting the code cache will need to acquire the code cache
+* protection lock first. Doing so after the state change may increase the
+* time spent in the RUNNING state (which may delay the next GC request
+* should there be contention on codeCacheProtectionLock). In practice
+* this is probably not going to happen often since a GC is just served.
+* More importantly, acquiring the lock before the state change will
+* cause deadlock (b/4192964).
+*/
     UNPROTECT_CODE_CACHE(startClassPointerP,
                          numClassPointers * sizeof(intptr_t));
 #if defined(WITH_JIT_TUNING)
@@ -2314,11 +2320,11 @@ void dvmJitInstallClassObjectPointers(CompilationUnit *cUnit, char *codeAddress)
     }
 
     /*
-     * Register the base address so that if GC kicks in after the thread state
-     * has been changed to VMWAIT and before the compiled code is registered
-     * in the JIT table, its content can be patched if class objects are
-     * moved.
-     */
+* Register the base address so that if GC kicks in after the thread state
+* has been changed to VMWAIT and before the compiled code is registered
+* in the JIT table, its content can be patched if class objects are
+* moved.
+*/
     gDvmJit.inflightBaseAddr = base;
 
 #if defined(WITH_JIT_TUNING)
@@ -2338,17 +2344,17 @@ void dvmJitInstallClassObjectPointers(CompilationUnit *cUnit, char *codeAddress)
 
 #if defined(WITH_SELF_VERIFICATION)
 /*
- * The following are used to keep compiled loads and stores from modifying
- * memory during self verification mode.
- *
- * Stores do not modify memory. Instead, the address and value pair are stored
- * into heapSpace. Addresses within heapSpace are unique. For accesses smaller
- * than a word, the word containing the address is loaded first before being
- * updated.
- *
- * Loads check heapSpace first and return data from there if an entry exists.
- * Otherwise, data is loaded from memory as usual.
- */
+* The following are used to keep compiled loads and stores from modifying
+* memory during self verification mode.
+*
+* Stores do not modify memory. Instead, the address and value pair are stored
+* into heapSpace. Addresses within heapSpace are unique. For accesses smaller
+* than a word, the word containing the address is loaded first before being
+* updated.
+*
+* Loads check heapSpace first and return data from there if an entry exists.
+* Otherwise, data is loaded from memory as usual.
+*/
 
 /* Used to specify sizes of memory operations */
 enum {
@@ -2386,10 +2392,10 @@ static void selfVerificationMemRegStoreDouble(int* sp, s8 data, int reg)
 }
 
 /*
- * Load the specified size of data from the specified address, checking
- * heapSpace first if Self Verification mode wrote to it previously, and
- * falling back to actual memory otherwise.
- */
+* Load the specified size of data from the specified address, checking
+* heapSpace first if Self Verification mode wrote to it previously, and
+* falling back to actual memory otherwise.
+*/
 static int selfVerificationLoad(int addr, int size)
 {
     Thread *self = dvmThreadSelf();
@@ -2455,16 +2461,16 @@ static s8 selfVerificationLoadDoubleword(int addr)
     }
 
     //ALOGD("*** HEAP LOAD DOUBLEWORD: Addr: %#x Data: %#x Data2: %#x",
-    //    addr, data, data2);
+    // addr, data, data2);
     return (((s8) data2) << 32) | data;
 }
 
 /*
- * Handles a store of a specified size of data to a specified address.
- * This gets logged as an addr/data pair in heapSpace instead of modifying
- * memory.  Addresses in heapSpace are unique, and accesses smaller than a
- * word pull the entire word from memory first before updating.
- */
+* Handles a store of a specified size of data to a specified address.
+* This gets logged as an addr/data pair in heapSpace instead of modifying
+* memory. Addresses in heapSpace are unique, and accesses smaller than a
+* word pull the entire word from memory first before updating.
+*/
 static void selfVerificationStore(int addr, int data, int size)
 {
     Thread *self = dvmThreadSelf();
@@ -2523,7 +2529,7 @@ static void selfVerificationStoreDoubleword(int addr, s8 double_data)
     bool store1 = false, store2 = false;
 
     //ALOGD("*** HEAP STORE DOUBLEWORD: Addr: %#x Data: %#x, Data2: %#x",
-    //    addr, data, data2);
+    // addr, data, data2);
 
     for (heapSpacePtr = shadowSpace->heapSpace;
          heapSpacePtr != shadowSpace->heapSpaceTail; heapSpacePtr++) {
@@ -2549,78 +2555,78 @@ static void selfVerificationStoreDoubleword(int addr, s8 double_data)
 }
 
 /*
- * Decodes the memory instruction at the address specified in the link
- * register. All registers (r0-r12,lr) and fp registers (d0-d15) are stored
- * consecutively on the stack beginning at the specified stack pointer.
- * Calls the proper Self Verification handler for the memory instruction and
- * updates the link register to point past the decoded memory instruction.
- */
+* Decodes the memory instruction at the address specified in the link
+* register. All registers (r0-r12,lr) and fp registers (d0-d15) are stored
+* consecutively on the stack beginning at the specified stack pointer.
+* Calls the proper Self Verification handler for the memory instruction and
+* updates the link register to point past the decoded memory instruction.
+*/
 void dvmSelfVerificationMemOpDecode(int lr, int* sp)
 {
     enum {
-        kMemOpLdrPcRel = 0x09, // ldr(3)  [01001] rd[10..8] imm_8[7..0]
-        kMemOpRRR      = 0x0A, // Full opcode is 7 bits
-        kMemOp2Single  = 0x0A, // Used for Vstrs and Vldrs
-        kMemOpRRR2     = 0x0B, // Full opcode is 7 bits
-        kMemOp2Double  = 0x0B, // Used for Vstrd and Vldrd
-        kMemOpStrRRI5  = 0x0C, // str(1)  [01100] imm_5[10..6] rn[5..3] rd[2..0]
-        kMemOpLdrRRI5  = 0x0D, // ldr(1)  [01101] imm_5[10..6] rn[5..3] rd[2..0]
+        kMemOpLdrPcRel = 0x09, // ldr(3) [01001] rd[10..8] imm_8[7..0]
+        kMemOpRRR = 0x0A, // Full opcode is 7 bits
+        kMemOp2Single = 0x0A, // Used for Vstrs and Vldrs
+        kMemOpRRR2 = 0x0B, // Full opcode is 7 bits
+        kMemOp2Double = 0x0B, // Used for Vstrd and Vldrd
+        kMemOpStrRRI5 = 0x0C, // str(1) [01100] imm_5[10..6] rn[5..3] rd[2..0]
+        kMemOpLdrRRI5 = 0x0D, // ldr(1) [01101] imm_5[10..6] rn[5..3] rd[2..0]
         kMemOpStrbRRI5 = 0x0E, // strb(1) [01110] imm_5[10..6] rn[5..3] rd[2..0]
         kMemOpLdrbRRI5 = 0x0F, // ldrb(1) [01111] imm_5[10..6] rn[5..3] rd[2..0]
         kMemOpStrhRRI5 = 0x10, // strh(1) [10000] imm_5[10..6] rn[5..3] rd[2..0]
         kMemOpLdrhRRI5 = 0x11, // ldrh(1) [10001] imm_5[10..6] rn[5..3] rd[2..0]
-        kMemOpLdrSpRel = 0x13, // ldr(4)  [10011] rd[10..8] imm_8[7..0]
-        kMemOpStmia    = 0x18, // stmia   [11000] rn[10..8] reglist [7..0]
-        kMemOpLdmia    = 0x19, // ldmia   [11001] rn[10..8] reglist [7..0]
-        kMemOpStrRRR   = 0x28, // str(2)  [0101000] rm[8..6] rn[5..3] rd[2..0]
-        kMemOpStrhRRR  = 0x29, // strh(2) [0101001] rm[8..6] rn[5..3] rd[2..0]
-        kMemOpStrbRRR  = 0x2A, // strb(2) [0101010] rm[8..6] rn[5..3] rd[2..0]
-        kMemOpLdrsbRRR = 0x2B, // ldrsb   [0101011] rm[8..6] rn[5..3] rd[2..0]
-        kMemOpLdrRRR   = 0x2C, // ldr(2)  [0101100] rm[8..6] rn[5..3] rd[2..0]
-        kMemOpLdrhRRR  = 0x2D, // ldrh(2) [0101101] rm[8..6] rn[5..3] rd[2..0]
-        kMemOpLdrbRRR  = 0x2E, // ldrb(2) [0101110] rm[8..6] rn[5..3] rd[2..0]
-        kMemOpLdrshRRR = 0x2F, // ldrsh   [0101111] rm[8..6] rn[5..3] rd[2..0]
-        kMemOp2Stmia   = 0xE88, // stmia  [111010001000[ rn[19..16] mask[15..0]
-        kMemOp2Ldmia   = 0xE89, // ldmia  [111010001001[ rn[19..16] mask[15..0]
-        kMemOp2Stmia2  = 0xE8A, // stmia  [111010001010[ rn[19..16] mask[15..0]
-        kMemOp2Ldmia2  = 0xE8B, // ldmia  [111010001011[ rn[19..16] mask[15..0]
-        kMemOp2Vstr    = 0xED8, // Used for Vstrs and Vstrd
-        kMemOp2Vldr    = 0xED9, // Used for Vldrs and Vldrd
-        kMemOp2Vstr2   = 0xEDC, // Used for Vstrs and Vstrd
-        kMemOp2Vldr2   = 0xEDD, // Used for Vstrs and Vstrd
+        kMemOpLdrSpRel = 0x13, // ldr(4) [10011] rd[10..8] imm_8[7..0]
+        kMemOpStmia = 0x18, // stmia [11000] rn[10..8] reglist [7..0]
+        kMemOpLdmia = 0x19, // ldmia [11001] rn[10..8] reglist [7..0]
+        kMemOpStrRRR = 0x28, // str(2) [0101000] rm[8..6] rn[5..3] rd[2..0]
+        kMemOpStrhRRR = 0x29, // strh(2) [0101001] rm[8..6] rn[5..3] rd[2..0]
+        kMemOpStrbRRR = 0x2A, // strb(2) [0101010] rm[8..6] rn[5..3] rd[2..0]
+        kMemOpLdrsbRRR = 0x2B, // ldrsb [0101011] rm[8..6] rn[5..3] rd[2..0]
+        kMemOpLdrRRR = 0x2C, // ldr(2) [0101100] rm[8..6] rn[5..3] rd[2..0]
+        kMemOpLdrhRRR = 0x2D, // ldrh(2) [0101101] rm[8..6] rn[5..3] rd[2..0]
+        kMemOpLdrbRRR = 0x2E, // ldrb(2) [0101110] rm[8..6] rn[5..3] rd[2..0]
+        kMemOpLdrshRRR = 0x2F, // ldrsh [0101111] rm[8..6] rn[5..3] rd[2..0]
+        kMemOp2Stmia = 0xE88, // stmia [111010001000[ rn[19..16] mask[15..0]
+        kMemOp2Ldmia = 0xE89, // ldmia [111010001001[ rn[19..16] mask[15..0]
+        kMemOp2Stmia2 = 0xE8A, // stmia [111010001010[ rn[19..16] mask[15..0]
+        kMemOp2Ldmia2 = 0xE8B, // ldmia [111010001011[ rn[19..16] mask[15..0]
+        kMemOp2Vstr = 0xED8, // Used for Vstrs and Vstrd
+        kMemOp2Vldr = 0xED9, // Used for Vldrs and Vldrd
+        kMemOp2Vstr2 = 0xEDC, // Used for Vstrs and Vstrd
+        kMemOp2Vldr2 = 0xEDD, // Used for Vstrs and Vstrd
         kMemOp2StrbRRR = 0xF80, /* str rt,[rn,rm,LSL #imm] [111110000000]
-                                rn[19-16] rt[15-12] [000000] imm[5-4] rm[3-0] */
+rn[19-16] rt[15-12] [000000] imm[5-4] rm[3-0] */
         kMemOp2LdrbRRR = 0xF81, /* ldrb rt,[rn,rm,LSL #imm] [111110000001]
-                                rn[19-16] rt[15-12] [000000] imm[5-4] rm[3-0] */
+rn[19-16] rt[15-12] [000000] imm[5-4] rm[3-0] */
         kMemOp2StrhRRR = 0xF82, /* str rt,[rn,rm,LSL #imm] [111110000010]
-                                rn[19-16] rt[15-12] [000000] imm[5-4] rm[3-0] */
+rn[19-16] rt[15-12] [000000] imm[5-4] rm[3-0] */
         kMemOp2LdrhRRR = 0xF83, /* ldrh rt,[rn,rm,LSL #imm] [111110000011]
-                                rn[19-16] rt[15-12] [000000] imm[5-4] rm[3-0] */
-        kMemOp2StrRRR  = 0xF84, /* str rt,[rn,rm,LSL #imm] [111110000100]
-                                rn[19-16] rt[15-12] [000000] imm[5-4] rm[3-0] */
-        kMemOp2LdrRRR  = 0xF85, /* ldr rt,[rn,rm,LSL #imm] [111110000101]
-                                rn[19-16] rt[15-12] [000000] imm[5-4] rm[3-0] */
+rn[19-16] rt[15-12] [000000] imm[5-4] rm[3-0] */
+        kMemOp2StrRRR = 0xF84, /* str rt,[rn,rm,LSL #imm] [111110000100]
+rn[19-16] rt[15-12] [000000] imm[5-4] rm[3-0] */
+        kMemOp2LdrRRR = 0xF85, /* ldr rt,[rn,rm,LSL #imm] [111110000101]
+rn[19-16] rt[15-12] [000000] imm[5-4] rm[3-0] */
         kMemOp2StrbRRI12 = 0xF88, /* strb rt,[rn,#imm12] [111110001000]
-                                       rt[15..12] rn[19..16] imm12[11..0] */
+rt[15..12] rn[19..16] imm12[11..0] */
         kMemOp2LdrbRRI12 = 0xF89, /* ldrb rt,[rn,#imm12] [111110001001]
-                                       rt[15..12] rn[19..16] imm12[11..0] */
+rt[15..12] rn[19..16] imm12[11..0] */
         kMemOp2StrhRRI12 = 0xF8A, /* strh rt,[rn,#imm12] [111110001010]
-                                       rt[15..12] rn[19..16] imm12[11..0] */
+rt[15..12] rn[19..16] imm12[11..0] */
         kMemOp2LdrhRRI12 = 0xF8B, /* ldrh rt,[rn,#imm12] [111110001011]
-                                       rt[15..12] rn[19..16] imm12[11..0] */
+rt[15..12] rn[19..16] imm12[11..0] */
         kMemOp2StrRRI12 = 0xF8C, /* str(Imm,T3) rd,[rn,#imm12] [111110001100]
-                                       rn[19..16] rt[15..12] imm12[11..0] */
+rn[19..16] rt[15..12] imm12[11..0] */
         kMemOp2LdrRRI12 = 0xF8D, /* ldr(Imm,T3) rd,[rn,#imm12] [111110001101]
-                                       rn[19..16] rt[15..12] imm12[11..0] */
+rn[19..16] rt[15..12] imm12[11..0] */
         kMemOp2LdrsbRRR = 0xF91, /* ldrsb rt,[rn,rm,LSL #imm] [111110010001]
-                                rn[19-16] rt[15-12] [000000] imm[5-4] rm[3-0] */
+rn[19-16] rt[15-12] [000000] imm[5-4] rm[3-0] */
         kMemOp2LdrshRRR = 0xF93, /* ldrsh rt,[rn,rm,LSL #imm] [111110010011]
-                                rn[19-16] rt[15-12] [000000] imm[5-4] rm[3-0] */
+rn[19-16] rt[15-12] [000000] imm[5-4] rm[3-0] */
         kMemOp2LdrsbRRI12 = 0xF99, /* ldrsb rt,[rn,#imm12] [111110011001]
-                                       rt[15..12] rn[19..16] imm12[11..0] */
+rt[15..12] rn[19..16] imm12[11..0] */
         kMemOp2LdrshRRI12 = 0xF9B, /* ldrsh rt,[rn,#imm12] [111110011011]
-                                       rt[15..12] rn[19..16] imm12[11..0] */
-        kMemOp2        = 0xE000, // top 3 bits set indicates Thumb2
+rt[15..12] rn[19..16] imm12[11..0] */
+        kMemOp2 = 0xE000, // top 3 bits set indicates Thumb2
     };
 
     int addr, offset, data;

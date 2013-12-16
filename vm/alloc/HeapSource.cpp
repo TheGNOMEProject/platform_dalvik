@@ -691,7 +691,7 @@ GcHeap* dvmHeapSourceStartup(size_t startSize, size_t maximumSize,
 
     if (!addInitialHeap(hs, msp, growthLimit)) {
         LOGE_HEAP("Can't add initial heap");
-        goto fail;
+        dvmAbort();
     }
     if (!dvmHeapBitmapInit(&hs->liveBits, base, length, "dalvik-bitmap-1")) {
         LOGE_HEAP("Can't create liveBits");
